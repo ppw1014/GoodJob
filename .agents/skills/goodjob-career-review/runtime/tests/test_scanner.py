@@ -1599,6 +1599,74 @@ def test_internal_git_config_cannot_read_an_include_outside_the_authorized_works
     assert "invalid external config" not in database_text
 
 
+def test_repo_manifest_metadata_escape_is_one_repository_level_diagnostic(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repository = workspace / "repository"
+    (workspace / ".repo" / "projects").mkdir(parents=True)
+    repository.mkdir(parents=True)
+    _git_init(repository)
+    (repository / "pyproject.toml").write_text(
+        "[project]\nname='repo-manifest'\n",
+        encoding="utf-8",
+    )
+    outside_config = tmp_path / "outside-config"
+    outside_config.write_text("repo-manifest-private-sentinel\n", encoding="utf-8")
+    (repository / ".git" / "config").unlink()
+    (repository / ".git" / "config").symlink_to(outside_config)
+
+    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace)
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="repo-manifest-escape-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "failed"
+    assert result.coverage["fresh_projects"] == 0
+    layout_issues = [
+        issue for issue in result.issues if issue.kind == "unsupported_repository_layout"
+    ]
+    assert len(layout_issues) == 1
+    assert "repository/.git/config" in layout_issues[0].message
+    assert not any(issue.kind == "symlink_skipped" for issue in result.issues)
+    database_text = (tmp_path / "data" / "goodjob.sqlite3").read_bytes().decode(
+        "utf-8", errors="ignore"
+    )
+    assert "repo-manifest-private-sentinel" not in database_text
+
+
+def test_repo_manifest_metadata_inside_authorized_root_remains_scannable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repository = workspace / "repository"
+    metadata_root = workspace / ".repo" / "projects"
+    metadata_root.mkdir(parents=True)
+    repository.mkdir(parents=True)
+    _git_init(repository)
+    (repository / "pyproject.toml").write_text(
+        "[project]\nname='repo-manifest-internal'\n",
+        encoding="utf-8",
+    )
+    config_target = metadata_root / "repository-config"
+    config_target.write_text((repository / ".git" / "config").read_text(encoding="utf-8"))
+    (repository / ".git" / "config").unlink()
+    (repository / ".git" / "config").symlink_to(Path("../../.repo/projects/repository-config"))
+
+    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace)
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="repo-manifest-internal-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "completed"
+    assert result.coverage["fresh_projects"] == 1
+    assert not any(issue.kind == "unsupported_repository_layout" for issue in result.issues)
+
+
 def test_internal_git_config_can_include_a_file_inside_the_authorized_workspace(
     tmp_path: Path,
 ) -> None:

@@ -120,6 +120,7 @@ HARD_EXCLUDED_DIRECTORIES = frozenset(
         "dist",
         "env",
         "node_modules",
+        ".repo",
         "secrets",
         "target",
         "venv",
@@ -295,6 +296,41 @@ def _symlink_may_escape(directory_relative: str, target: str) -> bool:
         else:
             components.append(part)
     return False
+
+
+def _normalized_link_target(base: Path, target: str) -> Path:
+    candidate = Path(target)
+    if not candidate.is_absolute():
+        candidate = base / PurePosixPath(target)
+    return Path(os.path.normpath(str(candidate)))
+
+
+def _link_chain_may_escape(workspace_root: Path, base: Path, target: str) -> bool:
+    """Check a metadata link chain without following any filesystem link."""
+    current = _normalized_link_target(base, target)
+    seen: set[Path] = set()
+    for _ in range(8):
+        if not _is_within(current, workspace_root) or current in seen:
+            return True
+        seen.add(current)
+        try:
+            relative = _relative_to_root(current, workspace_root)
+            current_stat = _safe_lstat(workspace_root, relative)
+        except OSError:
+            return True
+        if not stat.S_ISLNK(current_stat.st_mode):
+            return False
+        parent_relative = _relative_to_root(current.parent, workspace_root)
+        try:
+            parent_fd = _open_directory(workspace_root, parent_relative)
+            try:
+                next_target = _bound_readlink(parent_fd, current.name)
+            finally:
+                _close_directory(parent_fd)
+        except OSError:
+            return True
+        current = _normalized_link_target(current.parent, next_target)
+    return True
 
 
 @dataclass(frozen=True)
@@ -1233,8 +1269,14 @@ class WorkspaceScanner:
         scan_started_at: str,
     ) -> tuple[list[ProjectPlan], list[ScanIssueDraft]]:
         directories, issues = self._walk_directories(root)
+        manifest_roots = tuple(
+            directory
+            for directory in directories
+            if self._has_repo_manifest_marker(root, directory)
+        )
         git_worktrees: list[WorktreePlan] = []
         blocked_roots: set[Path] = set()
+        topology_violations: dict[Path, tuple[str, ...]] = {}
         grants_by_pointer = {grant.git_pointer_path: grant for grant in external_git_grants}
         for directory in directories:
             marker = directory / ".git"
@@ -1256,6 +1298,18 @@ class WorkspaceScanner:
                 blocked_roots.add(directory)
                 continue
             blocked_roots.add(directory)
+            manifest_scoped = any(
+                _is_within(directory, manifest_root) for manifest_root in manifest_roots
+            )
+            topology_entries = self._git_metadata_topology(
+                root,
+                marker_relative,
+                marker_stat,
+                manifest_scoped=manifest_scoped,
+            )
+            if topology_entries:
+                topology_violations[directory] = topology_entries
+                continue
             if stat.S_ISLNK(marker_stat.st_mode):
                 issues.append(
                     _issue(
@@ -1383,6 +1437,37 @@ class WorkspaceScanner:
             assert git_state is not None
             git_worktrees.append(WorktreePlan(directory, git_state))
 
+        if topology_violations:
+            sample_entries = sorted(
+                {
+                    f"{_relative_path(directory, root)}/{entry}"
+                    for directory, entries in topology_violations.items()
+                    for entry in entries
+                }
+            )[:8]
+            sample_text = ", ".join(sample_entries) if sample_entries else "metadata links"
+            issue_root = (
+                min(manifest_roots, key=lambda path: str(path))
+                if manifest_roots
+                else min(topology_violations, key=lambda path: str(path))
+            )
+            issues.append(
+                _issue(
+                    "unsupported_repository_layout",
+                    "warning",
+                    (
+                        "A repo/manifest Git layout uses metadata links outside the authorized "
+                        f"manifest root ({len(topology_violations)} repository roots; samples: "
+                        f"{sample_text})."
+                    ),
+                    (
+                        "Select and authorize the manifest root that contains all required Git "
+                        "metadata; GoodJob will not expand the current root automatically."
+                    ),
+                    _relative_path(issue_root, root),
+                )
+            )
+
         grouped: dict[str, list[WorktreePlan]] = {}
         for worktree in git_worktrees:
             assert worktree.git_state is not None
@@ -1421,6 +1506,88 @@ class WorkspaceScanner:
     _git_directory_relation_state = staticmethod(GitMetadataReader._git_directory_relation_state)
 
     _bind_internal_git = staticmethod(GitMetadataReader._bind_internal_git)
+
+    @staticmethod
+    def _has_repo_manifest_marker(workspace_root: Path, directory: Path) -> bool:
+        try:
+            relative_directory = _relative_to_root(directory, workspace_root)
+            marker = _child_relative(relative_directory, ".repo")
+            marker_stat = _safe_lstat(workspace_root, marker)
+        except (OSError, ValueError):
+            return False
+        return stat.S_ISDIR(marker_stat.st_mode)
+
+    def _git_metadata_topology(
+        self,
+        workspace_root: Path,
+        marker_relative: str,
+        marker_stat: os.stat_result,
+        *,
+        manifest_scoped: bool,
+    ) -> tuple[str, ...]:
+        """Inspect top-level Git metadata links before any Git subprocess starts."""
+        if stat.S_ISREG(marker_stat.st_mode):
+            git_dir = self._git_pointer_target_at(workspace_root, marker_relative)
+            if git_dir is None:
+                return ()
+            if not _is_within(git_dir, workspace_root):
+                return (".git/gitdir",) if manifest_scoped else ()
+        elif stat.S_ISDIR(marker_stat.st_mode):
+            git_dir = workspace_root / PurePosixPath(marker_relative)
+        else:
+            return ()
+
+        try:
+            git_dir_relative = _relative_to_root(git_dir, workspace_root)
+            git_dir_fd = _open_directory(workspace_root, git_dir_relative)
+        except OSError:
+            return ()
+        entries: list[_BoundDirectoryEntry]
+        try:
+            try:
+                entries = sorted(_bound_directory_entries(git_dir_fd), key=lambda entry: entry.name)
+            except OSError:
+                return ()
+            violations: list[str] = []
+            for entry in entries:
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISLNK(entry_stat.st_mode):
+                    continue
+                entry_relative = _child_relative(marker_relative, entry.name)
+                try:
+                    raw_target = _bound_readlink(git_dir_fd, entry.name)
+                except OSError:
+                    violations.append(entry_relative)
+                    continue
+                if _link_chain_may_escape(workspace_root, git_dir, raw_target):
+                    violations.append(entry_relative)
+
+            if manifest_scoped:
+                for relation_name in ("commondir", "gitdir"):
+                    relation_relative = _child_relative(git_dir_relative, relation_name)
+                    try:
+                        relation_stat = _safe_lstat(workspace_root, relation_relative)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        continue
+                    if not stat.S_ISREG(relation_stat.st_mode):
+                        continue
+                    relation_target = self._relation_target_at(
+                        workspace_root,
+                        git_dir_relative,
+                        relation_name,
+                    )
+                    if relation_target is not None and not _is_within(
+                        relation_target, workspace_root
+                    ):
+                        violations.append(_child_relative(marker_relative, relation_name))
+            return tuple(sorted(set(violations)))
+        finally:
+            _close_directory(git_dir_fd)
 
     def _walk_directories(self, root: Path) -> tuple[list[Path], list[ScanIssueDraft]]:
         directories: list[Path] = []
@@ -1469,6 +1636,8 @@ class WorkspaceScanner:
                     except OSError:
                         continue
                     child_relative = _child_relative(relative_directory, entry.name)
+                    if entry.name.lower() == ".repo":
+                        continue
                     if stat.S_ISLNK(entry_stat.st_mode):
                         try:
                             target = _bound_readlink(directory_fd, entry.name)

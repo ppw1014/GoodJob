@@ -43,7 +43,7 @@
 
 ### 3.1 探索顺序
 
-1. 将工作区根解析为规范化实路径；普通文件和目录符号链接一律不跟随。遍历器用 descriptor-relative `O_NOFOLLOW` 打开实际目录和文件：根内链接记录 `symlink_skipped` alias 覆盖信息，可能逃逸根外的链接记录 `symlink_outside_authorized_root`，二者都不产生项目、模块或 Evidence。需要纳入链接目标时，Owner 应把目标的真实目录作为新的显式工作区运行；工作区内 `.git` 普通文件对受限 Git 元数据的例外按 3.2 执行。
+1. 将工作区根解析为规范化实路径；普通文件和目录符号链接一律不跟随。遍历器用 descriptor-relative `O_NOFOLLOW` 打开实际目录和文件：根内链接记录 `symlink_skipped` alias 覆盖信息，可能逃逸根外的链接记录 `symlink_outside_authorized_root`，二者都不产生项目、模块或 Evidence。`.repo` 是 repo/manifest 的 Git 元数据目录，始终从普通源码遍历和逐链接诊断中排除；需要纳入链接目标时，Owner 应把目标的真实目录作为新的显式工作区运行；工作区内 `.git` 普通文件对受限 Git 元数据的例外按 3.2 执行。
 2. 在普通 ignore 生效前发现 `.git` 目录与 `.git` 指针文件。硬安全排除仍优先，避免进入依赖、构建和密钥区域。
 3. 对每个候选 Git 根读取本地 Git 元数据；先确定独立仓库，再按各自仓库规则扫描。父仓库的 `.gitignore` 不得吞掉内层 Git 仓库。
 4. 用规范化 `git common-dir` 归并同一 Git 项目的主工作树和 linked worktree；每个实际工作树保留单独的根、分支、HEAD 与 dirty observation。
@@ -59,6 +59,7 @@ Git 元数据损坏时，该候选项目产生 `broken_repository` 类 `ScanIssu
 - 关系探测解析出规范化 `git_dir/common_dir`，并返回两个目录的 device/inode 身份。扫描器必须把精确路径、身份、拟读取字段和边界再次展示给 Owner，取得当前会话同时绑定路径与身份的 `AuthorizationReceipt(external_git_metadata)`。随后仍只能通过 `O_NOFOLLOW` 目录描述符直接读取白名单字段，并在读取前后复核根内标记、双向关系、路径与目录身份；任何候选替换、路径变化、符号链接、格式错误或回指不匹配都形成 `untrusted_git_pointer` 或 `external_git_relation_mismatch` ScanIssue。外部阶段绝不启动 Git，因此也不会隐式读取 repository config。
 - 验证成功后，首版只读取绑定关系与 HEAD/ref；不读取 index/dirty 状态，并把相关覆盖明确标为不可用。不得读取根外 Git 历史、对象库、作者、标题、路径范围、blob、diff、其他 worktree、源码、配置或模块；需要此类信息时形成可见知识缺口，Owner 可显式扩大工作区后重新运行。覆盖报告必须列出工作树、已确认 git-dir/common-dir、回执时间和实际读取字段。
 - 内层 Git 根是独立项目。它的子树从父项目源码遍历中排除，避免同一文件同时归属父、子两个项目。
+- repo/manifest 工作区的 `.repo` 目录不作为 Project 或 Module 遍历；扫描器会在启动任何 Git 子进程前检查候选 `.git` 的顶层元数据链接、`gitdir` 和 `commondir`。目标仍在 Owner 当前授权根内时，沿既有 `O_NOFOLLOW` 绑定继续按子仓库扫描；目标越过授权根或链接链无法安全闭合时，只产生一个 repository-level `unsupported_repository_layout` 诊断，提示重新选择并授权包含完整元数据的 manifest 根，不自动扩大根、不读取根外目标，也不把 manifest 聚合体建模成一个 Project。
 
 ### 3.3 非 Git 项目与模块
 
