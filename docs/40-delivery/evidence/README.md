@@ -8,3 +8,4 @@
 - [`swo-128/filesystem-probe.md`](swo-128/filesystem-probe.md)：SWO-128 的 statfs 注入矩阵、POSIX preflight 与 scanner 入口保护证据。
 - [`swo-130/cpp-adapter.md`](swo-130/cpp-adapter.md)：SWO-130 的 C/C++ v1 适配器覆盖、事实提取与安全边界证据。
 - [`swo-127/issue-grouping.md`](swo-127/issue-grouping.md)：SWO-127 的扫描问题分组摘要、严重度优先与全量审计证据。
+- [`swo-129/host-session-client.md`](swo-129/host-session-client.md)：SWO-129 的官方 host session 客户端、参考集成与生命周期管理证据。
