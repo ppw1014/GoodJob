@@ -1,6 +1,6 @@
 # ADR-0003：证据指针与摘要，不保存源码快照
 
-> 状态：已接受（Codex 深读策略措辞部分拟由待接受的 [ADR-0010](ADR-0010-host-agent-neutral-session.md) 替代）
+> 状态：已接受（Codex 深读策略措辞部分已由已接受的 [ADR-0010](ADR-0010-host-agent-neutral-session.md) 替代）
 > 日期：2026-07-24  
 > 权威范围：证据持久化、Codex 深读策略和结论可追溯性  
 > 上游：[产品目标](../../00-product/vision-and-goals.md)  

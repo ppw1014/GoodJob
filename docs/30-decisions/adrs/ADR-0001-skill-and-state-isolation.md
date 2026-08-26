@@ -1,6 +1,6 @@
 # ADR-0001：Skill 版本资产与个人状态分离
 
-> 状态：已接受（平台限定部分由 [ADR-0009](ADR-0009-cross-platform-runtime-security.md) 替代；Codex-only 入口与数据目录绑定部分拟由待接受的 [ADR-0010](ADR-0010-host-agent-neutral-session.md) 替代）
+> 状态：已接受（平台限定部分由 [ADR-0009](ADR-0009-cross-platform-runtime-security.md) 替代；Codex-only 入口与数据目录绑定部分已由已接受的 [ADR-0010](ADR-0010-host-agent-neutral-session.md) 替代）
 > 日期：2026-07-24  
 > 权威范围：Skill 的产品形态、源码位置、安装位置与个人数据位置  
 > 上游：[产品目标](../../00-product/vision-and-goals.md)  

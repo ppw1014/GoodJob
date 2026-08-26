@@ -1,6 +1,6 @@
 # 任务卡 GJ-16A：补齐多工作树合成证据
 
-- 状态：待领取 ｜ 实现：Sol-Impl ｜ 出卡/评审：Sol
+- 状态：✅ 已验收合入（信道 #62，merge `b7be588`） ｜ 实现：Sol-Impl ｜ 出卡/评审：Sol
 - 对应 backlog：里程碑 M2 · 批次 G · GJ-16A
 - 前置任务：GJ-14、GJ-15 已验收合入；Owner 已于 2026-08-05 裁定 `OWN-01`
 - 分支：`task/GJ-16A-worktree-synthetic-evidence`，从派卡消息指定的本地 `main` 基线拉出

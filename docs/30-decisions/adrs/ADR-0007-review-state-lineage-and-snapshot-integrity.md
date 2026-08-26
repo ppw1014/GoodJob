@@ -1,6 +1,6 @@
 # ADR-0007：复习状态谱系与冻结快照完整性
 
-> 状态：已接受（Codex task awaiting-context 条款部分拟由待接受的 [ADR-0010](ADR-0010-host-agent-neutral-session.md) 替代）
+> 状态：已接受（Codex task awaiting-context 条款部分已由已接受的 [ADR-0010](ADR-0010-host-agent-neutral-session.md) 替代）
 > 日期：2026-07-24  
 > 权威范围：PreparationRun 对源码版本的绑定、复习状态跨快照连续性、静态看板更新与派生导出完整性  
 > 上游：[产品需求](../../10-product/product-requirements.md)  
