@@ -150,7 +150,15 @@ MANIFEST_NAMES = frozenset(
     }
 )
 SOURCE_EXTENSIONS = {
+    ".c": "cpp",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
     ".dart": "dart",
+    ".h": "cpp",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
     ".py": "python",
     ".rs": "rust",
     ".sql": "sql",
@@ -2270,6 +2278,7 @@ class WorkspaceScanner:
         suffix = path.suffix.lower()
         manifest_adapters = {
             "cargo.toml": "rust",
+            "cmakelists.txt": "cpp",
             "package.json": "typescript",
             "pubspec.yaml": "dart",
             "pyproject.toml": "python",

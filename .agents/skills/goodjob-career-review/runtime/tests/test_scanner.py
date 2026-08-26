@@ -369,6 +369,54 @@ def test_scan_discovers_isolated_projects_and_keeps_sensitive_bytes_out_of_sqlit
     assert "Secrets/hidden.py" not in stored_paths
 
 
+def test_scan_indexes_cpp_sources_and_cmake_manifest_with_cpp_v1(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = workspace / "cpp-project"
+    source_root = project / "src"
+    source_root.mkdir(parents=True)
+    (project / "CMakeLists.txt").write_text(
+        "find_package(Threads)\nadd_executable(app src/main.cpp)\n",
+        encoding="utf-8",
+    )
+    (source_root / "main.cpp").write_text(
+        '#include <thread>\n#include "router.hpp"\nint main() { std::thread worker; return 0; }\n',
+        encoding="utf-8",
+    )
+
+    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace, git_executable=sys.executable)
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="cpp-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "completed"
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    adapters = {
+        str(row[0]): str(row[1])
+        for row in connection.execute(
+            "SELECT a.relative_path, sr.adapter_id "
+            "FROM source_artifacts AS a "
+            "JOIN source_revisions AS sr ON sr.artifact_id = a.artifact_id "
+            "ORDER BY a.relative_path"
+        )
+    }
+    evidence_kinds = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT evidence_kind FROM evidence WHERE evidence_kind IN "
+            "('module_dependency', 'technology_usage', 'symbol_definition', 'entry_point')"
+        )
+    }
+    connection.close()
+
+    assert adapters["CMakeLists.txt"] == "cpp"
+    assert adapters["src/main.cpp"] == "cpp"
+    assert {"module_dependency", "technology_usage", "symbol_definition", "entry_point"} <= {
+        *evidence_kinds
+    }
+
+
 def test_refresh_fast_reuses_metadata_but_verify_content_detects_same_stat_change(
     tmp_path: Path,
 ) -> None:

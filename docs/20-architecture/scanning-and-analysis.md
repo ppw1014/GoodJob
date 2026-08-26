@@ -165,6 +165,7 @@ Owner 可在个人数据目录的 `config.toml` 中登记项目级排除规则�
 | Python | `pyproject`/requirements、包结构、import、CLI/Web 入口、异步/任务与测试配置 | 服务/工具模块、依赖使用、运行和测试证据 |
 | Rust | Cargo workspace/crate、module、feature、bin/lib、错误与异步边界、测试 | crate 关系、编译入口、能力边界与测试证据 |
 | Dart | `pubspec`、package、Flutter 应用入口、路由/状态/平台接线与测试 | 移动端模块、依赖使用、UI/平台与测试证据 |
+| C / C++ | CMakeLists、include 依赖、类/结构体/枚举/函数定义、main 入口点与能力边界 | 头文件包含、模块依赖、符号定义、入口与技术边界证据 |
 | SQL | migration/schema、表/关系、约束/索引、view/trigger、查询文件 | 数据模型、演进和查询能力证据；迁移与计划文档必须区分 |
 
 支持的结构化解析器失败时，该文件仍保留 `SourceArtifact/SourceRevision` 身份与内容哈希，但不生成 `implementation`、`manifest` 或其他成功分析 Evidence；扫描器持久化有界 `analysis_diagnostics`，并创建使项目覆盖降为 `partial` 的 `ScanIssue`。单文件事实达到上限时同样记录 `analysis_truncated`，不得把截断结果呈现为完整理解。诊断只包含运行时定义的状态与补救提示，不保存源码、解析异常原文或项目数据片段。

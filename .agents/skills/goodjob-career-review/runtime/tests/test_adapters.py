@@ -40,6 +40,7 @@ def test_first_release_adapters_emit_structural_language_evidence() -> None:
         artifact_kind="source",
         adapter_id="python",
     )
+
     assert {"technology_usage", "symbol_definition", "routing", "entry_point"} <= _kinds(
         relative_path="web/main.tsx",
         text=(
@@ -94,6 +95,96 @@ def test_first_release_adapters_emit_structural_language_evidence() -> None:
         artifact_kind="source",
         adapter_id="sql",
     )
+
+
+def test_cpp_adapter_emits_bounded_locatable_implementation_evidence() -> None:
+    result = analyze_file(
+        relative_path="src/main.cpp",
+        text=(
+            '#include <thread>\n'
+            '#include "router.hpp"\n'
+            "class Router { public: void serve(); };\n"
+            "void Router::serve() { std::thread worker; }\n"
+            "int main(int argc, char** argv) { return argc + (argv != nullptr); }\n"
+        ),
+        artifact_kind="source",
+        adapter_id="cpp",
+        base_evidence_kind="implementation",
+    )
+
+    kinds = {fact.evidence_kind for fact in result.facts}
+    assert {"module_dependency", "technology_usage", "symbol_definition", "entry_point"} <= kinds
+    assert "capability_boundary" in kinds
+    assert not result.diagnostics
+    assert all(
+        "line" in dict(fact.locator_fields) or fact.evidence_kind == "implementation"
+        for fact in result.facts
+    )
+
+
+def test_cpp_adapter_ignores_comments_strings_and_preprocessor_macros() -> None:
+    result = analyze_file(
+        relative_path="include/visible.hpp",
+        text=(
+            "// class Commented {};\n"
+            'const char* text = "class StringFake {}; socket(";\n'
+            "#define DECLARE_FAKE class MacroFake {}\n"
+            "struct Visible { int value; };\n"
+        ),
+        artifact_kind="source",
+        adapter_id="cpp",
+        base_evidence_kind="implementation",
+    )
+
+    symbols = {
+        dict(fact.locator_fields).get("symbol")
+        for fact in result.facts
+        if fact.evidence_kind == "symbol_definition"
+    }
+    assert "Visible" in symbols
+    assert not {"Commented", "StringFake", "MacroFake"} & symbols
+    assert "capability_boundary" not in {fact.evidence_kind for fact in result.facts}
+
+
+def test_cpp_adapter_reports_parse_failure_and_fact_truncation() -> None:
+    malformed = analyze_file(
+        relative_path="broken.cc",
+        text="int main() {\n",
+        artifact_kind="source",
+        adapter_id="cpp",
+        base_evidence_kind="implementation",
+    )
+    assert malformed.facts == ()
+    assert [diagnostic.kind for diagnostic in malformed.diagnostics] == ["source_parse_failed"]
+
+    many_functions = analyze_file(
+        relative_path="many.cpp",
+        text="\n".join(f"void function_{index}() {{}}" for index in range(500)),
+        artifact_kind="source",
+        adapter_id="cpp",
+        base_evidence_kind="implementation",
+    )
+    assert len(many_functions.facts) == MAX_FACTS_PER_FILE
+    assert {diagnostic.kind for diagnostic in many_functions.diagnostics} == {
+        "analysis_truncated"
+    }
+
+
+def test_cmake_manifest_uses_cpp_adapter_without_executing_cmake() -> None:
+    result = analyze_file(
+        relative_path="CMakeLists.txt",
+        text="find_package(Threads)\nadd_executable(app main.cpp)\n",
+        artifact_kind="manifest",
+        adapter_id="cpp",
+        base_evidence_kind="manifest",
+    )
+
+    assert not result.diagnostics
+    assert {fact.evidence_kind for fact in result.facts} >= {
+        "dependency_declaration",
+        "entry_configuration",
+        "module_boundary",
+    }
 
 
 def test_manifest_declaration_does_not_masquerade_as_actual_usage() -> None:
