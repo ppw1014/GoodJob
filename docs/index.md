@@ -48,6 +48,7 @@ GoodJob 已进入私有首版的实现与验证阶段：仓库包含可安装的
 | [ADR-0010](30-decisions/adrs/ADR-0010-host-agent-neutral-session.md) | 已接受 | Host Agent 无关会话：解除 Codex 硬编码绑定，宿主兼容性探针准入矩阵 | 不定义平台沙箱后端选择或原生 Windows 支持 |
 | [ADR-0011](30-decisions/adrs/ADR-0011-native-windows-security-contract.md) | 已接受（2026-08-14；ADR-0011 被部分替代：其 §3 的 Win32 rename/publish primitive 由 ADR-0012 替代） | 原生 Windows 的 WFP/Job、NT handle-relative FS、direct launcher/capability handle、所有权与 fail-closed 基础契约 | rename/publish primitive 以 ADR-0012 为准；cursor/reset 是 ADR-0012 对既有枚举边界的新增细化 |
 | [ADR-0012](30-decisions/adrs/ADR-0012-windows-nt-rename-and-directory-enumeration-correction.md) | 已接受（2026-08-16） | Windows NT class 10 rename/publish，以及对既有 handle-relative 枚举边界新增的 cursor/reset 操作契约 | 除 rename/publish primitive 外不替代 ADR-0011；IMP-31 未通过前仍 unsupported |
+| [ADR-0013](30-decisions/adrs/ADR-0013-platform-neutral-launcher-preflight.md) | 已接受（2026-08-18） | 平台无关 `launcher-preflight-v1`、输出/退出码、零副作用预检及 Windows 旧协议兼容边界 | 不替代 session 的安全检查或改变 broker 业务协议 |
 | [验收基线](40-delivery/acceptance-baseline.md) | 待 Owner 核对 | `G-*`、`FR-*`、`NFR-*` 的测试与交付门槛 | 不重新解释产品意图 |
 | [任务池](40-delivery/backlog.md) | 协作运行区 | 任务状态、归属与裁决引注 | 不定义任何产品或技术契约 |
 | [协作运行区](collab/) | 协作运行区 | 双 agent 协作协议、角色手册、反模式池、信道与任务卡 | 不定义任何产品或技术契约；与上表任一权威文档冲突时权威文档优先 |
@@ -88,7 +89,7 @@ GoodJob 已进入私有首版的实现与验证阶段：仓库包含可安装的
 | 项目访谈、模拟面试与复习 | D-029、D-032、D-033 | ADR-0002、ADR-0007、产物与学习闭环、验收基线 |
 | 运行恢复与个人数据保留 | D-037、D-038 | 系统设计、证据模型、验收基线 |
 | 不可信输入与安全呈现 | D-036、D-041、D-043 | ADR-0008、系统设计、扫描与分析设计、证据模型、看板呈现契约 |
-| 跨平台与 host agent 会话 | D-045、D-046、D-047 已接受；原生 Windows 发布门已启用，九项 prerequisite 逐次 fail-closed | ADR-0009、ADR-0010、ADR-0011、ADR-0012、系统设计、扫描与分析设计、验收基线 |
+| 跨平台与 host agent 会话 | D-045 至 D-048 已接受；统一 launcher 预检，原生 Windows 九项 prerequisite 逐次 fail-closed | ADR-0009 至 ADR-0013、系统设计、扫描与分析设计、验收基线 |
 | 明确延后能力 | F-001 至 F-009 | 决策账本“明确的非首版能力” |
 
 ## Owner 核对清单

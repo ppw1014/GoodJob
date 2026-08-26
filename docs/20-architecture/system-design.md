@@ -79,6 +79,7 @@ Skill 运行期间不得修改安装目录。升级、重装或删除 Skill 不�
 | `ARCH-C05` | 产物生成器 | 校验报告契约，生成中文报告/简历/HTML、工作稿、英文派生导出、manifest 和 `latest`；每次英文导出维护 ExportAttempt 与可恢复路径 | 改写 Claim、隐藏覆盖缺口、覆盖人工工作稿、让派生导出改写主快照 |
 | `ARCH-C06` | 离线 TypeScript 看板 | 在浏览器内完成导航、搜索、筛选、证据展开和复习状态展示 | 访问网络、启动服务、持久化新的数据库状态或执行源码扫描 |
 | `ARCH-C07` | Windows 平台安全后端 | 提供 WFP/Job/direct launcher、NT handle-relative FS、capability handle、进程身份、锁与 bounded-output；维护 Win32 handle 所有权 | 决定产品授权、回退到 pathname/无网络隔离后端、在未通过 IMP-31 时宣称 supported |
+| `ARCH-C08` | launcher 预检边界 | 发现受信 Python、按注册表产出/解析 `launcher-preflight-v1`、适配旧 Windows prerequisite 报告并控制 broker 启动前输出 | 读取工作区源码、创建个人状态、安装依赖、提权、联网或替代 session 的二次安全检查 |
 
 ### 3.1 `ARCH-C01`：Skill 编排器
 
@@ -114,6 +115,12 @@ Python 向前端提供版本化 `ReportBundle`，前端不得依赖数据库表�
 `ARCH-C07` 由平铺的平台模块组成：`sandbox_windows.py` 只负责 WFP/Job Git policy，`fs_windows.py` 只负责 NT handle-relative 文件系统原语，`launcher_windows.py` 统一 direct `CreateProcessW` 生命周期与 bounded-output，`capability_windows.py` 负责最小 handle 继承，`process_windows.py`/`lock_windows.py` 提供进程身份与单写者锁。上层 `safe_fs.py`、`source_io.py`、`scanner.py`、`git_metadata.py`、`session.py` 与 `auth.py` 必须经 `ARCH-I12` 委托，不能绕过后端直接选弱化 API。
 
 Windows launcher 的状态机固定为 `security_ready -> suspended -> assigned -> running -> terminated -> cleaned`。`security_ready` 对 Git 表示 WFP filters 已安装并逐项回读；`assigned` 表示 suspended 进程已加入按本次 policy 预配置的独立 Job。只有 `assigned` 能进入 `running`。Git Job 固定 `ACTIVE_PROCESS=1`；业务子进程 Job 按自身 policy 允许或限制后代，但获准后代必须留在同一 Job containment 中。`Win32Child` 对 process/thread/Job/pipe/capability/payload/WFP/attribute-list 逐项声明唯一 owner；失败和取消按 [ADR-0011](../30-decisions/adrs/ADR-0011-native-windows-security-contract.md) 的依赖逆序清理，Git 的 WFP session 最后关闭。`CREATE_NO_WINDOW` 固定保留；headless `conhost.exe` 可进入 Git Job accounting 但不提高 `ACTIVE_PROCESS=1` 限额。
+
+### 3.6 `ARCH-C08`：launcher 预检边界
+
+`launch_broker.py --preflight-only` 在源码授权与个人数据目录建立之前调用。它先用离线、禁止下载的运行时探测选择 Python，再由 `launcher_preflight.py` 的唯一注册表定义平台、launcher kind、必需 check 集合、顺序、notice 及可信 remediation 组合；producer 和 strict parser 共同读取该注册表。macOS/Linux 检查 Python 与既有 Git sandbox backend，unsupported 平台固定失败；Windows 只把旧 prerequisite 子进程已经验证的同一份报告无损映射到新 envelope。
+
+预检状态机只有 `produced -> validated -> ready|blocked`。未通过 strict parser 的 producer 输出转为受信 protocol failure，不能启动 broker。ready 的预检模式只在 stdout 输出 v1 并退出 `0`；blocked 只在 stdout 输出 v1 并退出 `2`。普通模式的 ready 状态不输出 launcher 诊断并进入 broker；任何 broker 建立前失败只在 stderr 输出一份 accepted v1 并退出 `2`。参数语法错误位于本协议之外。Windows prerequisite 进程无论完成、超时或中断都必须被 wait；session 内的第二次检查不因 launcher 报告而省略。
 
 ## 4. 稳定接口
 

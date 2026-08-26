@@ -63,6 +63,7 @@
 | D-045 | 跨平台运行时安全 | macOS 与 Linux（含 WSL2）使用等价的 Git 沙箱后端（sandbox-exec / bwrap）与进程身份（BSD ps / /proc）；任一后端不可用时 fail-closed，不回退到无沙箱。ADR-0009 部分替代 ADR-0001/ADR-0006 的 macOS-only 平台限定 | [ADR-0009](adrs/ADR-0009-cross-platform-runtime-security.md) |
 | D-046 | Host Agent 无关会话 | 解除 `issuer_kind` CHECK 约束（DB v11），参数化宿主运行时，新增 uv+python 回退启动器，并以五项探针管理宿主准入。ADR-0010 部分替代 ADR-0001/0003/0006/0007 中绑定 Codex 的条款 | [ADR-0010](adrs/ADR-0010-host-agent-neutral-session.md) |
 | D-047 | 原生 Windows 安全运行时 | 接受 WFP ALE dynamic filters + `ACTIVE_PROCESS=1` Git Job、NT handle-relative FS、direct `CreateProcessW`、最小 capability handle 继承与逆序清理契约。ADR-0012 基于真机反证，以 NT class 10 rename/publish primitive 替代 ADR-0011 §3 的 Win32 primitive，并在既有 handle-relative 枚举边界上新增 cursor/reset 操作细化；其余决策及唯一 Git FS 读隔离降级继续有效。原生 Windows 发布门已启用；launcher、preflight、session 与受保护子进程必须读取同一持久状态，且九项 prerequisite 任一失败都保持零 broker/受保护执行并提供准确 remediation 或 WSL2 建议 | [ADR-0011](adrs/ADR-0011-native-windows-security-contract.md)、[ADR-0012](adrs/ADR-0012-windows-nt-rename-and-directory-enumeration-correction.md) |
+| D-048 | 平台无关 launcher 预检 | 所有平台以 `--preflight-only` 输出封闭的 `launcher-preflight-v1`；producer/parser 共用检查与 remediation 注册表，预检零 broker/源码读取/个人状态/安装/提权/网络副作用。普通成功静默，启动前失败只输出 accepted v1。Windows 新协议无损包装同一次旧 prerequisite 报告，旧 flag 与两类旧报告继续兼容 | [ADR-0013](adrs/ADR-0013-platform-neutral-launcher-preflight.md) |
 
 ## 待接受决策
 

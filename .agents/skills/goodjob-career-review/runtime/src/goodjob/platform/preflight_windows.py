@@ -22,26 +22,18 @@ from goodjob.platform.handles_windows import (
     load_windows_dll,
     retry_retained_owners,
 )
+from goodjob.platform.launcher_preflight import (
+    WINDOWS_GIT_FS_NOTICE,
+    WINDOWS_PREFLIGHT_REQUIRED_CHECK_IDS,
+    remediation_for,
+)
 
 PreflightCode = Literal["missing_dependency", "permission_required", "unsupported_capability"]
 CheckStatus = Literal["passed", "failed"]
-WINDOWS_GIT_FS_NOTICE = (
-    "Native Windows Git subprocesses do not have filesystem read isolation; "
-    "use WSL2 when complete Git filesystem isolation is required."
-)
-WINDOWS_PREFLIGHT_REQUIRED_CHECK_IDS = frozenset(
-    {
-        "python_runtime",
-        "runtime_installation",
-        "trusted_git",
-        "workspace_filesystem",
-        "bfe_service",
-        "administrator",
-        "wfp_api",
-        "wfp_permission",
-        "native_windows_release",
-    }
-)
+_PASSED_CHECK_FIELDS = frozenset({"id", "status", "message"})
+_FAILED_CHECK_FIELDS = frozenset({"id", "status", "message", "code", "remediation"})
+_REMEDIATION_REQUIRED_FIELDS = frozenset({"action", "purpose", "requires_explicit_consent"})
+_REMEDIATION_OPTIONAL_FIELDS = frozenset({"source_url"})
 
 
 class PreflightRemediationDict(TypedDict, total=False):
@@ -285,6 +277,16 @@ class PreflightRemediation:
         return result
 
 
+def _registered_remediation(check_id: str, action: str) -> PreflightRemediation:
+    contract = remediation_for("windows", check_id, action)
+    return PreflightRemediation(
+        action=contract.action,
+        purpose=contract.purpose,
+        source_url=contract.source_url,
+        requires_explicit_consent=contract.requires_explicit_consent,
+    )
+
+
 @dataclass(frozen=True)
 class PreflightCheck:
     id: str
@@ -343,12 +345,7 @@ def missing_python_runtime_report() -> WindowsBootstrapReport:
             MissingDependencyError(
                 "Python 3.12 or newer is unavailable; uv is optional and no usable fallback exists"
             ),
-            PreflightRemediation(
-                action="request_installation",
-                purpose="run the isolated GoodJob broker with Python 3.12 or newer",
-                source_url="https://www.python.org/downloads/windows/",
-                requires_explicit_consent=True,
-            ),
+            _registered_remediation("python_runtime", "request_installation"),
         )
     )
 
@@ -377,10 +374,7 @@ def preflight_protocol_failure_report(message: str) -> WindowsBootstrapReport:
         _failed(
             "windows_preflight",
             UnsupportedCapabilityError(message),
-            PreflightRemediation(
-                action="repair_skill_or_use_wsl2",
-                purpose="complete every mandatory prerequisite before protected execution",
-            ),
+            _registered_remediation("windows_preflight", "repair_skill_or_use_wsl2"),
         )
     )
 
@@ -389,7 +383,8 @@ def _valid_failed_check(check: dict[object, object], allowed_ids: frozenset[str]
     check_id = check.get("id")
     remediation = check.get("remediation")
     if (
-        not isinstance(check_id, str)
+        set(check) != _FAILED_CHECK_FIELDS
+        or not isinstance(check_id, str)
         or check_id not in allowed_ids
         or check.get("status") != "failed"
         or check.get("code")
@@ -402,6 +397,9 @@ def _valid_failed_check(check: dict[object, object], allowed_ids: frozenset[str]
         or not isinstance(remediation.get("purpose"), str)
         or not remediation["purpose"]
         or not isinstance(remediation.get("requires_explicit_consent"), bool)
+        or not _REMEDIATION_REQUIRED_FIELDS
+        <= set(remediation)
+        <= (_REMEDIATION_REQUIRED_FIELDS | _REMEDIATION_OPTIONAL_FIELDS)
     ):
         return False
     if "source_url" in remediation:
@@ -440,7 +438,8 @@ def parse_windows_preflight_report(raw: object) -> WindowsPreflightReportDict | 
     checks = raw.get("checks")
     notices = raw.get("notices")
     if (
-        raw.get("contract_version") != "windows-prerequisite-preflight-v1"
+        set(raw) != {"contract_version", "status", "can_start_broker", "checks", "notices"}
+        or raw.get("contract_version") != "windows-prerequisite-preflight-v1"
         or not isinstance(can_start, bool)
         or status not in ("ok", "error")
         or not isinstance(checks, list)
@@ -466,7 +465,7 @@ def parse_windows_preflight_report(raw: object) -> WindowsPreflightReportDict | 
             return None
         seen_ids.add(check_id)
         if check_status == "passed":
-            if "code" in check or "remediation" in check:
+            if set(check) != _PASSED_CHECK_FIELDS:
                 return None
         else:
             all_passed = False
@@ -489,10 +488,7 @@ def _retained_owner_cleanup_report(
         _failed(
             check_id,
             cleanup_error,
-            PreflightRemediation(
-                action="retry_cleanup_or_repair_runtime_or_use_wsl2",
-                purpose="finish retained Windows resource cleanup before any new system probe",
-            ),
+            _registered_remediation(check_id, "retry_cleanup_or_repair_runtime_or_use_wsl2"),
         )
         for check_id in (
             "runtime_installation",
@@ -512,10 +508,7 @@ def _retained_owner_cleanup_report(
             UnsupportedCapabilityError(
                 "native Windows remains unsupported until IMP-31A-G pass on one release candidate"
             ),
-            PreflightRemediation(
-                action="use_wsl2",
-                purpose="keep all protected execution fail-closed until release acceptance",
-            ),
+            _registered_remediation("native_windows_release", "use_wsl2"),
         )
     )
     return WindowsPreflightReport((python_check, *cleanup_checks, release_check))
@@ -541,12 +534,7 @@ def evaluate_windows_preflight(
                     "Python 3.12 or newer is unavailable; uv is optional and no usable fallback "
                     "exists"
                 ),
-                PreflightRemediation(
-                    action="request_installation",
-                    purpose="run the isolated GoodJob broker with Python 3.12 or newer",
-                    source_url="https://www.python.org/downloads/windows/",
-                    requires_explicit_consent=True,
-                ),
+                _registered_remediation("python_runtime", "request_installation"),
             )
         )
     else:
@@ -565,6 +553,7 @@ def evaluate_windows_preflight(
         return _retained_owner_cleanup_report(python_check, release_enabled=release_enabled)
 
     runtime_files = (
+        runtime_dir / "scripts" / "broker_bootstrap.py",
         runtime_dir / "scripts" / "launch_broker.py",
         runtime_dir / "scripts" / "session.py",
         runtime_dir / "scripts" / "windows_preflight.py",
@@ -583,11 +572,7 @@ def evaluate_windows_preflight(
             _failed(
                 "runtime_installation",
                 MissingDependencyError("the installed GoodJob Skill runtime is incomplete"),
-                PreflightRemediation(
-                    action="request_reinstallation",
-                    purpose="restore the trusted GoodJob runtime files",
-                    requires_explicit_consent=True,
-                ),
+                _registered_remediation("runtime_installation", "request_reinstallation"),
             )
         )
 
@@ -604,12 +589,7 @@ def evaluate_windows_preflight(
                 MissingDependencyError(
                     r"Git for Windows is missing at a trusted mingw64\bin\git.exe path"
                 ),
-                PreflightRemediation(
-                    action="request_installation",
-                    purpose="read local Git metadata through the fixed trusted entry point",
-                    source_url="https://git-scm.com/download/win",
-                    requires_explicit_consent=True,
-                ),
+                _registered_remediation("trusted_git", "request_installation"),
             )
         )
     else:
@@ -628,10 +608,7 @@ def evaluate_windows_preflight(
                 UnsupportedCapabilityError(
                     f"native Windows scanning requires NTFS; the workspace is on {filesystem}"
                 ),
-                PreflightRemediation(
-                    action="use_ntfs_or_wsl2",
-                    purpose="preserve handle-relative filesystem authorization",
-                ),
+                _registered_remediation("workspace_filesystem", "use_ntfs_or_wsl2"),
             )
         )
     else:
@@ -650,11 +627,7 @@ def evaluate_windows_preflight(
             _failed(
                 "bfe_service",
                 UnsupportedCapabilityError("Base Filtering Engine is not running"),
-                PreflightRemediation(
-                    action="request_service_enablement",
-                    purpose="establish the mandatory WFP network boundary",
-                    requires_explicit_consent=True,
-                ),
+                _registered_remediation("bfe_service", "request_service_enablement"),
             )
         )
 
@@ -673,11 +646,7 @@ def evaluate_windows_preflight(
                 PermissionRequiredError(
                     "an elevated administrator token is required to install WFP filters"
                 ),
-                PreflightRemediation(
-                    action="request_elevation",
-                    purpose="install and verify request-scoped WFP filters",
-                    requires_explicit_consent=True,
-                ),
+                _registered_remediation("administrator", "request_elevation"),
             )
         )
 
@@ -694,10 +663,7 @@ def evaluate_windows_preflight(
             _failed(
                 "wfp_api",
                 UnsupportedCapabilityError("Windows Filtering Platform API is unavailable"),
-                PreflightRemediation(
-                    action="repair_windows_or_use_wsl2",
-                    purpose="preserve mandatory Git network isolation",
-                ),
+                _registered_remediation("wfp_api", "repair_windows_or_use_wsl2"),
             )
         )
 
@@ -725,10 +691,7 @@ def evaluate_windows_preflight(
                     UnsupportedCapabilityError(
                         "the dynamic WFP policy store could not be verified"
                     ),
-                    PreflightRemediation(
-                        action="repair_windows_or_use_wsl2",
-                        purpose="preserve mandatory Git network isolation",
-                    ),
+                    _registered_remediation("wfp_permission", "repair_windows_or_use_wsl2"),
                 )
             )
         else:
@@ -738,11 +701,7 @@ def evaluate_windows_preflight(
                     PermissionRequiredError(
                         "the current token could not create a dynamic WFP policy"
                     ),
-                    PreflightRemediation(
-                        action="request_elevation",
-                        purpose="install and verify request-scoped WFP filters",
-                        requires_explicit_consent=True,
-                    ),
+                    _registered_remediation("wfp_permission", "request_elevation"),
                 )
             )
     elif not elevated:
@@ -750,11 +709,7 @@ def evaluate_windows_preflight(
             _failed(
                 "wfp_permission",
                 PermissionRequiredError("WFP filter installation requires an elevated token"),
-                PreflightRemediation(
-                    action="request_elevation",
-                    purpose="install and verify request-scoped WFP filters",
-                    requires_explicit_consent=True,
-                ),
+                _registered_remediation("wfp_permission", "request_elevation"),
             )
         )
     else:
@@ -765,10 +720,7 @@ def evaluate_windows_preflight(
                     "WFP filter permission cannot be established while BFE or the WFP API "
                     "is unavailable"
                 ),
-                PreflightRemediation(
-                    action="repair_windows_or_use_wsl2",
-                    purpose="preserve mandatory Git network isolation",
-                ),
+                _registered_remediation("wfp_permission", "repair_windows_or_use_wsl2"),
             )
         )
 
@@ -782,10 +734,7 @@ def evaluate_windows_preflight(
                     "native Windows remains unsupported until IMP-31A-G pass on one release "
                     "candidate"
                 ),
-                PreflightRemediation(
-                    action="use_wsl2",
-                    purpose="keep all protected execution fail-closed until release acceptance",
-                ),
+                _registered_remediation("native_windows_release", "use_wsl2"),
             )
         )
     return WindowsPreflightReport(tuple(checks))

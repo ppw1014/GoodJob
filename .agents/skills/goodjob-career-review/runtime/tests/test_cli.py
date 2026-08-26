@@ -503,16 +503,13 @@ def test_launcher_reports_a_stable_error_when_broker_process_cannot_start(
         env={**os.environ, "PATH": str(executable_dir)},
     )
 
-    if sys.platform == "win32":
-        assert result.returncode == 2
-        report = json.loads(result.stderr)
-        assert report["contract_version"] == "windows-bootstrap-report-v1"
-    else:
-        assert result.returncode == 1
-        assert result.stdout == ""
-        assert result.stderr == "error: failed to start the GoodJob session broker\n"
-        assert str(tmp_path) not in result.stderr
-        assert "Traceback" not in result.stderr
+    assert result.returncode == 2
+    assert result.stdout == ""
+    report = json.loads(result.stderr)
+    assert report["contract_version"] == "launcher-preflight-v1"
+    assert report["can_start_broker"] is False
+    assert str(tmp_path) not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_isolated_launcher_entry_ignores_python_environment_injection(
@@ -539,7 +536,7 @@ def test_isolated_launcher_entry_ignores_python_environment_injection(
         env={**os.environ, "PATH": "", "PYTHONPATH": str(injection_dir)},
     )
 
-    assert result.returncode == (2 if sys.platform == "win32" else 1)
+    assert result.returncode == 2
     assert not marker.exists()
     assert "Traceback" not in result.stderr
 
@@ -551,9 +548,15 @@ def test_skill_keeps_a_stable_launcher_entry_without_a_platform_matrix() -> None
     for expected in (
         "`runtime/scripts/launch_broker.py`",
         "isolated, no-bytecode Python 3.12+",
+        "`--preflight-only`",
+        "`--workspace <displayed workspace path>`",
+        "`launcher-preflight-v1`",
+        "stdout contains exactly one UTF-8 JSON",
+        "stderr is empty",
+        "`can_start_broker: true`",
+        "`can_start_broker: false`",
         "stable `--agent-runtime` identifier",
         "ordinary standard input",
-        "only when the launcher emits a structured bootstrap or preflight report",
         (
             "If a required dependency, permission, or capability decision has no structured "
             "launcher fact"
@@ -564,6 +567,8 @@ def test_skill_keeps_a_stable_launcher_entry_without_a_platform_matrix() -> None
         "`unsupported_capability`",
         "explicit Owner consent",
         "stop fail-closed",
+        "Do not use a platform-private preflight flag",
+        "infer a branch from the environment name",
     ):
         assert expected in session_workflow
 
@@ -580,6 +585,8 @@ def test_skill_keeps_a_stable_launcher_entry_without_a_platform_matrix() -> None
         "https://",
         "WFP",
         "IPv6",
+        "--windows-preflight-only",
+        "sys.platform",
     ):
         assert platform_detail not in session_workflow
 
