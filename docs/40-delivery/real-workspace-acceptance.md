@@ -1,6 +1,6 @@
 # 真实工作区只读验收记录
 
-> 状态：待 Architect 终审  
+> 状态：已终审合入（信道 #112）
 > 任务：GJ-16B（CodeRoute / SliverShield 真实工作区只读验收）  
 > 验收基线：[验收基线 §4](acceptance-baseline.md)  
 > 执行日期：2026-08-10  

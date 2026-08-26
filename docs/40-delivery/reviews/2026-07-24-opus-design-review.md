@@ -4,7 +4,7 @@
 > 评审范围：`docs/` 下全部权威文档（产品愿景、产品需求、系统设计、证据模型、扫描与分析、产物与学习闭环、决策账本、ADR-0001~0005、验收基线）  
 > 评审对象基线：commit `25b7b93`（docs: establish GoodJob v1 design baseline）  
 > 评审者：Claude Opus 4.8　日期：2026-07-24  
-> 说明：本文件不进入 [文档地图](docs/index.md) 的权威体系，也不改变任何 `G-*`/`FR-*`/`NFR-*`/ADR 契约；仅记录设计层面的漏洞、内部矛盾与优化建议，供 Owner 核对时参考。
+> 说明：本文件不进入 [文档地图](../../index.md) 的权威体系，也不改变任何 `G-*`/`FR-*`/`NFR-*`/ADR 契约；仅记录设计层面的漏洞、内部矛盾与优化建议，供 Owner 核对时参考。
 
 ## 总体评价
 
@@ -23,28 +23,28 @@
 
 ### P0-1　“本地优先”的隐私主张与 Codex 深读的实际数据流存在预期落差，且缺少保密/授权责任声明
 
-- **现状**：[产品愿景](docs/00-product/vision-and-goals.md) 的产品主张原则 4、目标 `G-06` 与“非目标”均使用了精心限定的措辞——“不**主动**上传”“不复制成**完整**数据库快照”“不发给**第三方**分析服务”。[产品需求 NFR-01](docs/10-product/product-requirements.md) 也诚实承认“Codex 对源码的读取受当前会话数据边界约束”。
+- **现状**：[产品愿景](../../00-product/vision-and-goals.md) 的产品主张原则 4、目标 `G-06` 与“非目标”均使用了精心限定的措辞——“不**主动**上传”“不复制成**完整**数据库快照”“不发给**第三方**分析服务”。[产品需求 NFR-01](../../10-product/product-requirements.md) 也诚实承认“Codex 对源码的读取受当前会话数据边界约束”。
 - **问题**：字面诚实不等于用户理解无偏差。Codex 深读时，被选中的源文件内容会经由 Codex 会话**发送给云端模型**。而本产品的目标用户是“拿本地所有历史项目准备求职”，这些项目**极可能包含现/前雇主的专有代码**。整套文档没有任何一处提示：(a) 深读内容会经 Codex 会话外发；(b) 用户须确保自己**有权**分析这些代码并据此对外生成简历/面试材料（NDA / 保密义务）。
 - **风险等级**：高。这是产品**信任基础**上最该补的一块，且触及潜在合规风险。
 - **建议**：在 vision 或 NFR-01 明确一句“深读内容通过 Codex 会话发送给模型，GoodJob 不额外新增上传通道”，并新增一条用户授权/保密责任声明。
 
 ### P0-2　复习闭环绑定在 `preparation_run_id` 上，refresh 后进度不流转，与 `G-05` 冲突
 
-- **现状**：`InterviewReview`（掌握度、薄弱点、`next_review_at`）绑定 `preparation_run_id`（[证据模型 EVID-E27](docs/20-architecture/evidence-model.md)）。而 refresh 要采用新证据，**必须创建新的 PreparationRun**（证据模型 §6.3）。
+- **现状**：`InterviewReview`（掌握度、薄弱点、`next_review_at`）绑定 `preparation_run_id`（[证据模型 EVID-E27](../../20-architecture/evidence-model.md)）。而 refresh 要采用新证据，**必须创建新的 PreparationRun**（证据模型 §6.3）。
 - **问题**：`ProjectContextFact`（访谈答案）是项目级、会跨 run 复用；但**面试复盘/掌握度是 run 级、不会自动流转到新准备包**。用户每次 refresh + prepare，新看板的复习状态即为空。这与 `G-05`“形成可持续复习闭环”、`SC-05` 的意图有落差。文档只承诺旧数据“仍可读取”（数据未丢，成立），但没承诺**复习进度在新准备包内延续**——而“可持续复习”恰恰依赖后者。
 - **风险等级**：高（核心产品闭环之一）。
 - **建议**：把复习状态锚定到更稳定的身份（project / 知识主题）而非易变的 run，或显式定义新 run 如何继承上一 run 的复习进度。
 
 ### P0-3　根外 Git 元数据例外由不可信的 `.git` 指针驱动，缺目标校验与用户可见确认
 
-- **现状**：授权边界唯一的根外读取例外，是“沿工作区内 `.git` 指针读取受限 Git 元数据”（[扫描与分析 §3.2](docs/20-architecture/scanning-and-analysis.md)）。而 `NFR-08` / `ARCH-INV-11` 又明确 `.git` 内容是**不可信数据**。
+- **现状**：授权边界唯一的根外读取例外，是“沿工作区内 `.git` 指针读取受限 Git 元数据”（[扫描与分析 §3.2](../../20-architecture/scanning-and-analysis.md)）。而 `NFR-08` / `ARCH-INV-11` 又明确 `.git` 内容是**不可信数据**。
 - **问题**：`.git` 指针文件的 `gitdir:` 目标路径**由工作区内文件内容决定**。一个构造的 `.git` 文件可把 common-dir 指向任意根外路径（如另一个敏感仓库），系统便会去那里读取 commit 作者/标题/变更路径名并写入证据库与产物。“受限”限制了**字段种类**，却没限制**目标位置的合法性**。文档没有要求目标必须由 Git 自身机制解析（如 `git rev-parse --git-common-dir`）而非直接信任指针文本，也没要求把“本次使用了根外元数据、指向何处”向用户**显式确认**（仅要求进覆盖报告）。验收 `IMP-09` 测了根外 common-dir 的元数据边界，但未测“恶意指针指向无关敏感路径”。
 - **风险等级**：高（跨授权边界的安全细节）。
 - **建议**：契约中增加——根外 common-dir 必须校验为该 worktree 经 Git 解析出的合法目标，且首次触及需用户可见/可确认；补充对应的注入/越权验收场景。
 
 ### P0-4　深读哈希刚性与“活跃开发工作树”冲突，缺平滑路径
 
-- **现状**：preparation-scope Evidence 的 `SourceRevision` **必须属于冻结的 ProjectSnapshot**（[证据模型 §3.2](docs/20-architecture/evidence-model.md)），深读时哈希不符即整批拒绝并要求 refresh（`EVID-INV-15`）。
+- **现状**：preparation-scope Evidence 的 `SourceRevision` **必须属于冻结的 ProjectSnapshot**（[证据模型 §3.2](../../20-architecture/evidence-model.md)），深读时哈希不符即整批拒绝并要求 refresh（`EVID-INV-15`）。
 - **问题**：证据模型**不保存源码**，深读只能读磁盘当前内容；而 `modified` / `untracked` 文件又是被明确支持的合法证据（`D-016`、`FR-11`）。二者叠加意味着：**只要磁盘领先于冻结快照，深读证据就无法落库**。对“一边写代码一边准备面试”这一现实场景，`scan → prepare` 之间任何编辑都会强制“必须先 refresh 再 prepare”。文档把 scan/refresh 与 prepare 分离，却未为“准备期间工作树继续变化”给出平滑处理或操作序列提示，用户会遭遇反复的整批拒绝而不明所以。
 - **风险等级**：高（一致性正确，但可用性代价大）。
 - **建议**：明确 prepare 前对 dirty 工作树的即时重扫策略，或在流程中提示“prepare 会冻结当前快照，其后编辑需 refresh”。
@@ -55,19 +55,19 @@
 
 ### P1-5　`ProjectAssessment`「每个发现项目恰有一条」与 `failed_no_baseline`/`excluded` disposition 冲突
 
-- **现状**：`EVID-E31` + `EVID-INV-17` 要求每个发现项目**恰有一条** ProjectAssessment，且含 `dimension_scores`、`evidence_and_gap_refs`、`base_score`、`final_score`（[证据模型](docs/20-architecture/evidence-model.md)）。
+- **现状**：`EVID-E31` + `EVID-INV-17` 要求每个发现项目**恰有一条** ProjectAssessment，且含 `dimension_scores`、`evidence_and_gap_refs`、`base_score`、`final_score`（[证据模型](../../20-architecture/evidence-model.md)）。
 - **问题**：证据模型 §6.2 的 disposition 中，`failed_no_baseline` 项目**没有 ProjectSnapshot、没有 Evidence**，`excluded` 是被配置排除的。对这两类，“恰有一条含证据评分的 ProjectAssessment”要么无法满足，要么需要一套未定义的“空评估”语义。
 - **建议**：明确 ProjectAssessment 的适用集合（仅 `fresh`/`carried_forward`，还是全部 disposition 都占位评估），并定义 `failed_no_baseline`/`excluded` 的评估表达方式。
 
 ### P1-6　`FR-02`「JD 文件不可读」的降级契约在 IMP 场景矩阵无对应验收项
 
-- **现状**：`FR-02` 规定 JD 文件不可读时“必须要求更正或让用户明确以无 JD 模式继续，**不得静默忽略**”，[产品需求 §5 关键失败路径](docs/10-product/product-requirements.md) 亦列此项。
-- **问题**：[验收基线](docs/40-delivery/acceptance-baseline.md) 追溯表把 `FR-02` 映射到 `IMP-01`，但 `IMP-01` 只验“参数缺失只追问、无 JD 不阻塞”，`IMP-05` 只验“JD 作为输入读取”的授权边界。**“JD 文件指定了但读不了”这条具体降级路径没有任何 IMP 覆盖**——与 `DOC-04`“三区一致”的自我要求存在缺口。
+- **现状**：`FR-02` 规定 JD 文件不可读时“必须要求更正或让用户明确以无 JD 模式继续，**不得静默忽略**”，[产品需求 §5 关键失败路径](../../10-product/product-requirements.md) 亦列此项。
+- **问题**：[验收基线](../../40-delivery/acceptance-baseline.md) 追溯表把 `FR-02` 映射到 `IMP-01`，但 `IMP-01` 只验“参数缺失只追问、无 JD 不阻塞”，`IMP-05` 只验“JD 作为输入读取”的授权边界。**“JD 文件指定了但读不了”这条具体降级路径没有任何 IMP 覆盖**——与 `DOC-04`“三区一致”的自我要求存在缺口。
 - **建议**：给 `IMP-01` 或新增一条场景补上“JD 文件不可读 → 要求更正 / 显式无 JD 模式，不静默忽略”。
 
 ### P1-7　英文导出缺少与中文侧对称的结构化事实保真校验
 
-- **现状**：中文侧有 `record_analysis`（`ARCH-I06`）强门槛，校验冻结范围、facet、反证与个人归因，拒绝模型编造。英文导出走 `translate_export`（`ARCH-I10`，[系统设计 §4](docs/20-architecture/system-design.md)），契约要求“不新增未证实成果、不生成新 Claim”（`ART-08`）。
+- **现状**：中文侧有 `record_analysis`（`ARCH-I06`）强门槛，校验冻结范围、facet、反证与个人归因，拒绝模型编造。英文导出走 `translate_export`（`ARCH-I10`，[系统设计 §4](../../20-architecture/system-design.md)），契约要求“不新增未证实成果、不生成新 Claim”（`ART-08`）。
 - **问题**：英文侧**没有等价的结构化校验闭环**——它直接由产物生成器翻译输出。翻译本身是模型行为，“不新增”目前只是约束、缺乏可执行校验（例如英文 Claim 集必须与源快照 Claim 集一一对应）。防编造护栏在中文侧很严、英文侧几乎只靠自觉。
 - **建议**：为 `translate_export` 补一个“投影项与源快照条目一一对齐”的结构化校验。
 
@@ -77,15 +77,15 @@
 
 `DOC-06` 要求“不把影响实现的选择留给后续开发者自行决定”。以下几项属于**行为契约级**（非“命令/版本”那类可留给任务卡的细节），目前未定义：
 
-- **中断/放弃运行的生命周期**：`PreparationRun` 状态机有 `awaiting_context`（[证据模型 §6.4](docs/20-architecture/evidence-model.md)），但没有“用户永不回答 / 会话中断”的终止或恢复转换；首次全量 `scan` 中途被杀后，再次运行是全量重来还是续扫，也未定义。
-- **进程锁的崩溃恢复**：单写者锁只说“先取锁”（[系统设计 §6](docs/20-architecture/system-design.md)），未定义陈旧锁检测/超时/进程崩溃后的释放。
+- **中断/放弃运行的生命周期**：`PreparationRun` 状态机有 `awaiting_context`（[证据模型 §6.4](../../20-architecture/evidence-model.md)），但没有“用户永不回答 / 会话中断”的终止或恢复转换；首次全量 `scan` 中途被杀后，再次运行是全量重来还是续扫，也未定义。
+- **进程锁的崩溃恢复**：单写者锁只说“先取锁”（[系统设计 §6](../../20-architecture/system-design.md)），未定义陈旧锁检测/超时/进程崩溃后的释放。
 - **RoleLens `weight` 求和为 1 的浮点处理**：`EVID-E23` 要求 weight 总和为 1（模型生成），但没定义容差 epsilon 或归一化策略——是拒绝重试还是自动归一化、由谁归一化。
 - **符号链接循环防护**：扫描与分析 §3.1 只说“目标在授权根内才跟随”，未提 symlink loop 的遍历保护。
 - **“本地默认分支”确定与 detached HEAD 降级**：180 天窗口取“HEAD 与本地默认分支可达提交并集”（扫描与分析 §5.2），但无 remote、detached HEAD 或默认分支不存在时如何降级未定义。
 - **mtime 跳过的漏检残留风险**：性能门禁要求“无变化 refresh 只处理元数据”，实际即用 mtime/大小跳过；但 mtime 被保留而内容变化的情况会漏检。文档说 mtime“不能替代内容身份”（证据模型 §6.1），却没承认该权衡或给出缓解（如对 dirty 工作树强制重算、提供 deep-refresh）。
 - **数据单调增长无保留策略**：`artifacts/` / `exports/` 每次成功都追加不可变快照，SQLite 只增不删（`EVID-INV-06`）。长期使用无归档/清理契约——即便决定“不做清理”，也应作为一条显式决策（`F-00x`）记下。
 
-另有一个**体验成本**值得 Owner 意识到（非缺陷）：离线看板纯只读，复习状态更新必须“回到 Skill/Python 接口”再重新渲染快照（[产物与学习闭环 §6](docs/20-architecture/artifacts-and-learning.md)）。即“模拟面试 → 记录复盘 → 重新 render → 看板才更新”，闭环偏重。这是 ADR-0002 离线静态的刻意取舍，但与 P0-2 一起看，会放大复习闭环的摩擦。
+另有一个**体验成本**值得 Owner 意识到（非缺陷）：离线看板纯只读，复习状态更新必须“回到 Skill/Python 接口”再重新渲染快照（[产物与学习闭环 §6](../../20-architecture/artifacts-and-learning.md)）。即“模拟面试 → 记录复盘 → 重新 render → 看板才更新”，闭环偏重。这是 ADR-0002 离线静态的刻意取舍，但与 P0-2 一起看，会放大复习闭环的摩擦。
 
 ---
 

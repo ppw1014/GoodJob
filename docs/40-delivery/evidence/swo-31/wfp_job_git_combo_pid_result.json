@@ -1,0 +1,282 @@
+{
+  "admin": true,
+  "dynamic_cleanup": {
+    "601481": {
+      "name": "FWP_E_FILTER_NOT_FOUND",
+      "status": 2150760451
+    },
+    "601482": {
+      "name": "FWP_E_FILTER_NOT_FOUND",
+      "status": 2150760451
+    }
+  },
+  "git": "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+  "local_log": {
+    "accounting": {
+      "active_processes": 0,
+      "query_ok": true,
+      "total_processes": 2,
+      "total_terminated_processes": 0
+    },
+    "args": [
+      "--no-pager",
+      "log",
+      "-1",
+      "--format=%H"
+    ],
+    "assigned_before_resume": {
+      "ok": true,
+      "winerror": 0
+    },
+    "completed": {
+      "exit_code": 0,
+      "timed_out": false,
+      "wait": 0
+    },
+    "create_suspended": {
+      "ok": true,
+      "winerror": 0
+    },
+    "in_job_before_resume": {
+      "api_ok": true,
+      "in_job": true
+    },
+    "job": {
+      "active_process_limit": 1,
+      "completion_port": {
+        "associated": true,
+        "created": true,
+        "winerror": 0
+      },
+      "created": true,
+      "set_limits": true,
+      "winerror": 0
+    },
+    "job_events": [
+      {
+        "image": "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+        "message": "NEW_PROCESS",
+        "process_id": 24568
+      },
+      {
+        "image": "C:\\Windows\\System32\\conhost.exe",
+        "message": "NEW_PROCESS",
+        "process_id": 42752
+      },
+      {
+        "image": null,
+        "message": "EXIT_PROCESS",
+        "process_id": 24568
+      },
+      {
+        "image": null,
+        "message": "EXIT_PROCESS",
+        "process_id": 42752
+      },
+      {
+        "image": null,
+        "message": "ACTIVE_PROCESS_ZERO",
+        "process_id": null
+      }
+    ],
+    "resume": {
+      "ok": true,
+      "previous_suspend_count": 1
+    },
+    "stderr": "",
+    "stdout": "d9741882f12a2d6f53a28ba151b01952aeded2ee"
+  },
+  "local_rev_parse": {
+    "accounting": {
+      "active_processes": 0,
+      "query_ok": true,
+      "total_processes": 2,
+      "total_terminated_processes": 0
+    },
+    "args": [
+      "rev-parse",
+      "--is-inside-work-tree"
+    ],
+    "assigned_before_resume": {
+      "ok": true,
+      "winerror": 0
+    },
+    "completed": {
+      "exit_code": 0,
+      "timed_out": false,
+      "wait": 0
+    },
+    "create_suspended": {
+      "ok": true,
+      "winerror": 0
+    },
+    "in_job_before_resume": {
+      "api_ok": true,
+      "in_job": true
+    },
+    "job": {
+      "active_process_limit": 1,
+      "completion_port": {
+        "associated": true,
+        "created": true,
+        "winerror": 0
+      },
+      "created": true,
+      "set_limits": true,
+      "winerror": 0
+    },
+    "job_events": [
+      {
+        "image": "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+        "message": "NEW_PROCESS",
+        "process_id": 60452
+      },
+      {
+        "image": "C:\\Windows\\System32\\conhost.exe",
+        "message": "NEW_PROCESS",
+        "process_id": 51484
+      },
+      {
+        "image": null,
+        "message": "EXIT_PROCESS",
+        "process_id": 60452
+      },
+      {
+        "image": null,
+        "message": "EXIT_PROCESS",
+        "process_id": 51484
+      },
+      {
+        "image": null,
+        "message": "ACTIVE_PROCESS_ZERO",
+        "process_id": null
+      }
+    ],
+    "resume": {
+      "ok": true,
+      "previous_suspend_count": 1
+    },
+    "stderr": "",
+    "stdout": "true"
+  },
+  "post_cleanup_close": 0,
+  "post_cleanup_open": {
+    "name": "ERROR_SUCCESS",
+    "status": 0
+  },
+  "remote_helper_attempt": {
+    "accounting": {
+      "active_processes": 0,
+      "query_ok": true,
+      "total_processes": 2,
+      "total_terminated_processes": 0
+    },
+    "args": [
+      "ls-remote",
+      "--exit-code",
+      "https://github.com/git/git",
+      "HEAD"
+    ],
+    "assigned_before_resume": {
+      "ok": true,
+      "winerror": 0
+    },
+    "completed": {
+      "exit_code": 255,
+      "timed_out": false,
+      "wait": 0
+    },
+    "create_suspended": {
+      "ok": true,
+      "winerror": 0
+    },
+    "in_job_before_resume": {
+      "api_ok": true,
+      "in_job": true
+    },
+    "job": {
+      "active_process_limit": 1,
+      "completion_port": {
+        "associated": true,
+        "created": true,
+        "winerror": 0
+      },
+      "created": true,
+      "set_limits": true,
+      "winerror": 0
+    },
+    "job_events": [
+      {
+        "image": "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+        "message": "NEW_PROCESS",
+        "process_id": 35780
+      },
+      {
+        "image": "C:\\Windows\\System32\\conhost.exe",
+        "message": "NEW_PROCESS",
+        "process_id": 59076
+      },
+      {
+        "image": null,
+        "message": "ACTIVE_PROCESS_LIMIT",
+        "process_id": null
+      },
+      {
+        "image": null,
+        "message": "ACTIVE_PROCESS_LIMIT",
+        "process_id": null
+      },
+      {
+        "image": null,
+        "message": "EXIT_PROCESS",
+        "process_id": 35780
+      },
+      {
+        "image": null,
+        "message": "EXIT_PROCESS",
+        "process_id": 59076
+      },
+      {
+        "image": null,
+        "message": "ACTIVE_PROCESS_ZERO",
+        "process_id": null
+      }
+    ],
+    "resume": {
+      "ok": true,
+      "previous_suspend_count": 1
+    },
+    "stderr": "error: cannot spawn git: Function not implemented",
+    "stdout": ""
+  },
+  "repo": ".spike_git_repo",
+  "wfp": {
+    "app_id": {
+      "name": "ERROR_SUCCESS",
+      "status": 0
+    },
+    "filters": {
+      "connect_v4": {
+        "filter_id": 601481,
+        "name": "ERROR_SUCCESS",
+        "readback": 0,
+        "status": 0
+      },
+      "connect_v6": {
+        "filter_id": 601482,
+        "name": "ERROR_SUCCESS",
+        "readback": 0,
+        "status": 0
+      }
+    },
+    "sublayer": {
+      "name": "ERROR_SUCCESS",
+      "status": 0
+    }
+  },
+  "wfp_close": 0,
+  "wfp_open": {
+    "name": "ERROR_SUCCESS",
+    "status": 0
+  }
+}

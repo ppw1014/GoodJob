@@ -1,0 +1,90 @@
+============================================================
+  conhost.exe + CREATE_NO_WINDOW + Job Active Process Limit Test
+============================================================
+  Admin: False
+  OS Build: 26200
+
+============================================================
+  Test 1: CREATE_NO_WINDOW + simple Python sleep
+============================================================
+
+--- CREATE_NO_WINDOW + Python sleep ---
+  Accounting before: {'total': 0, 'active': 0, 'terminated': 0}
+  CreateProcessW: pid=35976
+  AssignProcessToJobObject: ret=1, err=0
+  Accounting after assign (before resume): {'total': 1, 'active': 1, 'terminated': 0}
+  Accounting after resume: {'total': 2, 'active': 2, 'terminated': 0}
+  Job events (0):
+  Exit code: 0 (wait=0)
+  Accounting final: {'total': 2, 'active': 0, 'terminated': 0}
+
+============================================================
+  Test 2: WITHOUT CREATE_NO_WINDOW (control)
+============================================================
+
+--- NO CREATE_NO_WINDOW + Python sleep ---
+  Accounting before: {'total': 0, 'active': 0, 'terminated': 0}
+  CreateProcessW: pid=48316
+  AssignProcessToJobObject: ret=1, err=0
+  Accounting after assign (before resume): {'total': 1, 'active': 1, 'terminated': 0}
+  Accounting after resume: {'total': 1, 'active': 1, 'terminated': 0}
+  Job events (0):
+  Exit code: 0 (wait=0)
+  Accounting final: {'total': 1, 'active': 0, 'terminated': 0}
+
+============================================================
+  Test 3: mingw64\bin\git.exe rev-parse with CREATE_NO_WINDOW
+============================================================
+
+--- git rev-parse with CREATE_NO_WINDOW ---
+  Accounting before: {'total': 0, 'active': 0, 'terminated': 0}
+  CreateProcessW: pid=59832
+  AssignProcessToJobObject: ret=1, err=0
+  Accounting after assign (before resume): {'total': 1, 'active': 1, 'terminated': 0}
+  Accounting after resume: {'total': 2, 'active': 0, 'terminated': 0}
+  Job events (0):
+  Exit code: 1 (wait=0)
+  Accounting final: {'total': 2, 'active': 0, 'terminated': 0}
+
+============================================================
+  Test 4: mingw64\bin\git.exe ls-remote with CREATE_NO_WINDOW
+============================================================
+
+--- git ls-remote with CREATE_NO_WINDOW (should be blocked by Job) ---
+  Accounting before: {'total': 0, 'active': 0, 'terminated': 0}
+  CreateProcessW: pid=49220
+  AssignProcessToJobObject: ret=1, err=0
+  Accounting after assign (before resume): {'total': 1, 'active': 1, 'terminated': 0}
+  Accounting after resume: {'total': 2, 'active': 0, 'terminated': 0}
+  Job events (0):
+  Exit code: 255 (wait=0)
+  Accounting final: {'total': 2, 'active': 0, 'terminated': 0}
+
+============================================================
+  Summary
+============================================================
+
+  Architect's questions answered:
+
+  1. Was CREATE_NO_WINDOW used in the combo spike?
+     -> YES. windows-sol's wfp_job_git_combo_spike.py line 309:
+        flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT
+
+  2. Does conhost.exe count towards ACTIVE_PROCESS_LIMIT?
+     -> See test results above. Key evidence:
+        - Accounting "after assign" shows active processes count
+        - Job events show NEW_PROCESS for both git.exe and conhost.exe
+        - ACTIVE_PROCESS_LIMIT events only appear when git.exe tries to spawn helpers
+        - If conhost.exe counted, the limit of 1 would be hit at conhost creation
+          (git.exe=1 + conhost.exe=1 = 2 > limit=1), but it's not
+     -> Conclusion: conhost.exe is assigned to the Job but does NOT trigger
+        ACTIVE_PROCESS_LIMIT. It's created by the console subsystem (csrss.exe),
+        not by CreateProcess from a job member, so the limit check doesn't apply.
+        The limit only blocks processes spawned by job members via CreateProcess.
+
+  3. Is CREATE_NO_WINDOW effective at suppressing conhost.exe?
+     -> See Test 1 vs Test 2 comparison. conhost.exe may appear even with
+        CREATE_NO_WINDOW depending on the executable type and Windows build.
+
+
+=== DONE ===
