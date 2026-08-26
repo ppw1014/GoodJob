@@ -46,6 +46,8 @@ def _run_command(
         command,
         capture_output=capture_output,
         text=text,
+        encoding="utf-8",
+        errors="replace",
         check=check,
         timeout=timeout,
     )

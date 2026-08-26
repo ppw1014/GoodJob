@@ -12,6 +12,9 @@
 .agent_context/
 description.md
 
+# Multica 运行时注入（不作为项目规则提交）
+/AGENTS.md
+
 # 运行时 data directory 若被误指向仓库内会产生的产物（GJ-22 §3.6/§5 前置条件 1）
 **/build/
 **/*.egg-info/

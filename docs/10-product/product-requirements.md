@@ -228,7 +228,9 @@ WSL1 不支持用户命名空间（bwrap 依赖），因此 WSL1 上 bwrap 后�
 
 ### FR-17：Host Agent 无关会话
 
-通过 `--agent-runtime` 参数标识宿主运行时；`issuer_kind` 为自由文本，默认 `codex_task_runtime` 保持向后兼容；`uv` 不存在时自动回退到 `python3.12`。
+通过 `--agent-runtime` 参数标识宿主运行时；`issuer_kind` 为自由文本，默认 `codex_task_runtime` 保持向后兼容；`uv` 不存在时自动回退到 `python3.12`。每个宿主在请求源码授权前必须能通过同一个 `--preflight-only` 入口取得 `launcher-preflight-v1`：它用固定 check、notice 与 remediation 说明当前环境能否启动 broker，不要求宿主识别操作系统分支。预检不得读取工作区源码、创建个人状态或启动 broker；需要安装或提权时只报告用途并等待 Owner 明示同意。
+
+**验收结果：** ready 时 stdout 只有一份 accepted v1、stderr 为空并退出 `0`；not-ready 时同样只在 stdout 返回 accepted v1 并退出 `2`。普通启动成功保持 launcher 静默；broker 建立前失败只在 stderr 返回 accepted v1，不把自由文本或协议损坏误判成可继续。
 
 ### FR-18：原生 Windows 安全运行时
 

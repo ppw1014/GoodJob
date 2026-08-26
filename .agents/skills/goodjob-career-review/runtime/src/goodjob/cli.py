@@ -45,7 +45,7 @@ MAX_PROTECTED_PAYLOAD_BYTES = MAX_PRIVATE_PAYLOAD_BYTES
 
 
 def _write_json(stream: Any, payload: dict[str, Any]) -> None:
-    stream.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    stream.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
 
 
 def _data_usage(path: Path) -> int:

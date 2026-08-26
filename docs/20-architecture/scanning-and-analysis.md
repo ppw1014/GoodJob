@@ -43,7 +43,7 @@
 
 ### 3.1 探索顺序
 
-1. 将工作区根解析为规范化实路径；普通文件和目录符号链接一律不跟随。遍历器用 descriptor-relative `O_NOFOLLOW` 打开实际目录和文件：根内链接记录 `symlink_skipped` alias 覆盖信息，可能逃逸根外的链接记录 `symlink_outside_authorized_root`，二者都不产生项目、模块或 Evidence。需要纳入链接目标时，Owner 应把目标的真实目录作为新的显式工作区运行；工作区内 `.git` 普通文件对受限 Git 元数据的例外按 3.2 执行。
+1. 将工作区根解析为规范化实路径；普通文件和目录符号链接一律不跟随。遍历器用 descriptor-relative `O_NOFOLLOW` 打开实际目录和文件：根内链接记录 `symlink_skipped` alias 覆盖信息，可能逃逸根外的链接记录 `symlink_outside_authorized_root`，二者都不产生项目、模块或 Evidence。`.repo` 是 repo/manifest 的 Git 元数据目录，始终从普通源码遍历和逐链接诊断中排除；需要纳入链接目标时，Owner 应把目标的真实目录作为新的显式工作区运行；工作区内 `.git` 普通文件对受限 Git 元数据的例外按 3.2 执行。
 2. 在普通 ignore 生效前发现 `.git` 目录与 `.git` 指针文件。硬安全排除仍优先，避免进入依赖、构建和密钥区域。
 3. 对每个候选 Git 根读取本地 Git 元数据；先确定独立仓库，再按各自仓库规则扫描。父仓库的 `.gitignore` 不得吞掉内层 Git 仓库。
 4. 用规范化 `git common-dir` 归并同一 Git 项目的主工作树和 linked worktree；每个实际工作树保留单独的根、分支、HEAD 与 dirty observation。
@@ -59,6 +59,7 @@ Git 元数据损坏时，该候选项目产生 `broken_repository` 类 `ScanIssu
 - 关系探测解析出规范化 `git_dir/common_dir`，并返回两个目录的 device/inode 身份。扫描器必须把精确路径、身份、拟读取字段和边界再次展示给 Owner，取得当前会话同时绑定路径与身份的 `AuthorizationReceipt(external_git_metadata)`。随后仍只能通过 `O_NOFOLLOW` 目录描述符直接读取白名单字段，并在读取前后复核根内标记、双向关系、路径与目录身份；任何候选替换、路径变化、符号链接、格式错误或回指不匹配都形成 `untrusted_git_pointer` 或 `external_git_relation_mismatch` ScanIssue。外部阶段绝不启动 Git，因此也不会隐式读取 repository config。
 - 验证成功后，首版只读取绑定关系与 HEAD/ref；不读取 index/dirty 状态，并把相关覆盖明确标为不可用。不得读取根外 Git 历史、对象库、作者、标题、路径范围、blob、diff、其他 worktree、源码、配置或模块；需要此类信息时形成可见知识缺口，Owner 可显式扩大工作区后重新运行。覆盖报告必须列出工作树、已确认 git-dir/common-dir、回执时间和实际读取字段。
 - 内层 Git 根是独立项目。它的子树从父项目源码遍历中排除，避免同一文件同时归属父、子两个项目。
+- repo/manifest 工作区的 `.repo` 目录不作为 Project 或 Module 遍历；扫描器会在启动任何 Git 子进程前检查候选 `.git` 的顶层元数据链接、`gitdir` 和 `commondir`。目标仍在 Owner 当前授权根内时，沿既有 `O_NOFOLLOW` 绑定继续按子仓库扫描；目标越过授权根或链接链无法安全闭合时，只产生一个 repository-level `unsupported_repository_layout` 诊断，提示重新选择并授权包含完整元数据的 manifest 根，不自动扩大根、不读取根外目标，也不把 manifest 聚合体建模成一个 Project。
 
 ### 3.3 非 Git 项目与模块
 
@@ -66,7 +67,13 @@ Git 元数据损坏时，该候选项目产生 `broken_repository` 类 `ScanIssu
 
 模块边界优先由 Git 项目的 workspace manifest、语言 workspace 配置、服务/应用 manifest、数据库迁移根和明确的 build/test 配置给出。无法由这些证据确认的目录只作为文件集合，不创建虚假的 `Module`。模块记录本次 `ProjectSnapshot` 的边界，随快照版本化（`FR-03`、`NFR-07`）。
 
-### 3.4 原生 Windows 文件系统与 Git 边界
+### 3.4 POSIX 工作区文件系统能力预检
+
+macOS/Linux launcher 在收到 `--workspace` 时，在启动 broker 或 Git 前对工作区路径做只读文件系统能力探测。macOS 优先读取系统 `statfs` 的 filesystem type 与 local flag：APFS/HFS 等已知本地类型可继续，sshfs、macFUSE/FUSE、NFS、SMB、WebDAV 及其他明确非本地类型返回 `workspace_filesystem` failed check 和 `unsupported_capability` remediation；未知类型或探测失败也 fail-closed，并保留稳定的 type/flags 诊断字段，不解析本地化 stderr。Linux 的 bwrap 仍是访问隔离权威，普通本地路径维持既有行为。
+
+同一能力探测也在 scanner 直接入口执行，失败会在已建立的终态 `ScanRun` 中写入一个 `workspace_filesystem_unsupported` error，随后返回结构化 `failed` 结果；因此绕过 launcher 不会把挂载问题泛化成 Git boundary issue。探测只调用本地系统 API，不通过 SSH 远程执行、不自动复制工作区、不自动换根。完整 issue 仍写入 SQLite，overview 的摘要展示规则见 §5。
+
+### 3.5 原生 Windows 文件系统与 Git 边界
 
 原生 Windows 入口只允许把一个绝对路径解析为授权 root handle 一次；入口立即记录 `GetFinalPathNameByHandleW` 的显示路径及 `FileIdInfo` 的 volume serial/file ID。后续 discovery、index、source read、rename、publish、remove、scanner readlink 与目录枚举只经 `ARCH-I12` 传递 borrowed root/parent handle 和单个名称组件，不能把缓存 pathname 当作授权。
 
@@ -158,6 +165,7 @@ Owner 可在个人数据目录的 `config.toml` 中登记项目级排除规则�
 | Python | `pyproject`/requirements、包结构、import、CLI/Web 入口、异步/任务与测试配置 | 服务/工具模块、依赖使用、运行和测试证据 |
 | Rust | Cargo workspace/crate、module、feature、bin/lib、错误与异步边界、测试 | crate 关系、编译入口、能力边界与测试证据 |
 | Dart | `pubspec`、package、Flutter 应用入口、路由/状态/平台接线与测试 | 移动端模块、依赖使用、UI/平台与测试证据 |
+| C / C++ | CMakeLists、include 依赖、类/结构体/枚举/函数定义、main 入口点与能力边界 | 头文件包含、模块依赖、符号定义、入口与技术边界证据 |
 | SQL | migration/schema、表/关系、约束/索引、view/trigger、查询文件 | 数据模型、演进和查询能力证据；迁移与计划文档必须区分 |
 
 支持的结构化解析器失败时，该文件仍保留 `SourceArtifact/SourceRevision` 身份与内容哈希，但不生成 `implementation`、`manifest` 或其他成功分析 Evidence；扫描器持久化有界 `analysis_diagnostics`，并创建使项目覆盖降为 `partial` 的 `ScanIssue`。单文件事实达到上限时同样记录 `analysis_truncated`，不得把截断结果呈现为完整理解。诊断只包含运行时定义的状态与补救提示，不保存源码、解析异常原文或项目数据片段。

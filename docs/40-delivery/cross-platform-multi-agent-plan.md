@@ -322,7 +322,7 @@ Phase 2 开卡前对 `docs/`、README、SKILL 清单做一次 `Codex|codex_task|
 
 ## 6. Phase 3：原生 Windows 平台支持（仅 Git FS 读隔离降级）
 
-> 当前状态（2026-08-14）：Phase 3-A 已终审并接受 ADR-0011，Phase 3-B 运行时候选已合入；`IMP-31A-G` 真机准入尚未通过，因此原生 Windows 继续 unsupported / fail-closed 并推荐 WSL2。下文保留派工时的 spike 与实现步骤作为交付追溯，不表示这些步骤已经获得发布证据。
+> 当前状态（2026-08-16）：Phase 3-A/B 已闭合，最终发布候选启用原生 Windows 持久 release gate。每次运行仍须在 broker 前通过九项 prerequisite，失败时给出准确 remediation 或 WSL2 建议；用户运行不依赖 GNU Make。候选只有在同一冻结 head/tree 上通过 Windows `make gate` 与 `IMP-31A-G`，且最终 merge tree 与候选 tree 完全一致时才能合入；下文保留早期 spike 与实现步骤作为交付追溯。
 
 **目标：** 原生 Windows（非 WSL）可运行；只保留 Owner 已接受的 Git 文件系统读隔离缺口，网络隔离、扫描器授权根边界和进程树回收不降级。
 
@@ -415,7 +415,7 @@ Phase 3 先以真机 spike 验证 §6.1 的 WFP、NT handle-relative FS 和 dire
 
 ### 6.4 交付物
 
-- 原生 Windows 只有在 WFP、NT handle-relative FS、direct launcher 和真机负测全部通过后才标记 supported；否则显示 unsupported 并建议 WSL2
+- 原生 Windows 发布门已启用；每次运行只有在 WFP、NT handle-relative FS、direct launcher 所需的九项 prerequisite 全部通过后才启动 broker，否则 fail-closed 并给出准确修复动作或 WSL2 建议
 - 唯一安全降级是 Git 无文件系统读隔离，且已在权威契约和运行前提示中可见
 - WSL2 用户仍走 Linux bwrap（完整沙箱）
 

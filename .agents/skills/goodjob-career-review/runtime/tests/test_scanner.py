@@ -7,7 +7,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Mapping
+import uuid
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
@@ -20,7 +21,9 @@ from goodjob.auth import AuthorizationRepository, AuthorizationRequest, generate
 from goodjob.cli import run
 from goodjob.config import MAX_CONFIG_FILE_BYTES
 from goodjob.db import Database
+from goodjob.errors import InvalidInputError
 from goodjob.paths import DataPaths
+from goodjob.platform.filesystem_probe import FilesystemProbeResult
 from goodjob.scanner import (
     IGNORE_PATTERN_SYNTAX,
     IgnoreMatcher,
@@ -61,8 +64,13 @@ def _broker(data_dir: Path, *, extra_env: Mapping[str, str] | None = None) -> su
     environment = {**os.environ, "PYTHONPATH": str(RUNTIME_DIR / "src")}
     if extra_env is not None:
         environment.update(extra_env)
+    command = [sys.executable, "scripts/session.py", "--data-dir", str(data_dir)]
+    if sys.platform == "win32":
+        workspace = data_dir.parent / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        command.extend(["--preflight-workspace", str(workspace)])
     return subprocess.Popen(
-        [sys.executable, "scripts/session.py", "--data-dir", str(data_dir)],
+        command,
         cwd=RUNTIME_DIR,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -77,7 +85,11 @@ def _close_broker(process: subprocess.Popen[str]) -> None:
     process.stdin.close()
     assert process.wait(timeout=5) == 0
     assert process.stderr is not None
-    assert process.stderr.read() == ""
+    stderr = process.stderr.read()
+    if sys.platform == "win32":
+        assert json.loads(stderr)["can_start_broker"] is True
+    else:
+        assert stderr == ""
 
 
 def _authorize_source(
@@ -111,6 +123,7 @@ def _authorize_source(
 
 def _git_init(path: Path) -> None:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True, text=True)
+    _git(path, "config", "core.autocrlf", "false")
 
 
 def _git(
@@ -148,8 +161,24 @@ def _git_wrapper(tmp_path: Path) -> tuple[dict[str, str], Path]:
     )
 
 
+def _rewrite_git_pointer(pointer: Path, content: str) -> None:
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+        kernel32.SetFileAttributesW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        kernel32.SetFileAttributesW.restype = ctypes.c_int
+        if not kernel32.SetFileAttributesW(str(pointer), 0x00000080):
+            raise ctypes.WinError(ctypes.get_last_error())
+    pointer.write_text(content, encoding="utf-8")
+
+
 def _direct_scanner(
-    data_dir: Path, workspace: Path, *, git_executable: str | None = None
+    data_dir: Path,
+    workspace: Path,
+    *,
+    git_executable: str | None = None,
+    filesystem_probe: Callable[[Path], FilesystemProbeResult] | None = None,
 ) -> tuple[WorkspaceScanner, str]:
     database = Database(DataPaths(data_dir))
     capability = generate_capability()
@@ -162,10 +191,15 @@ def _direct_scanner(
         capability=capability,
         request=request,
     )
-    return (
-        WorkspaceScanner(database, git_executable=git_executable),
-        receipt.authorization_receipt_id,
-    )
+    if filesystem_probe is None:
+        scanner = WorkspaceScanner(database, git_executable=git_executable)
+    else:
+        scanner = WorkspaceScanner(
+            database,
+            git_executable=git_executable,
+            filesystem_probe=filesystem_probe,
+        )
+    return scanner, receipt.authorization_receipt_id
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows active-root regression")
@@ -334,6 +368,56 @@ def test_scan_discovers_isolated_projects_and_keeps_sensitive_bytes_out_of_sqlit
     assert "hidden.ts" not in stored_text
     assert ".envrc" not in stored_paths
     assert "Secrets/hidden.py" not in stored_paths
+
+
+def test_scan_indexes_cpp_sources_and_cmake_manifest_with_cpp_v1(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = workspace / "cpp-project"
+    source_root = project / "src"
+    source_root.mkdir(parents=True)
+    (project / "CMakeLists.txt").write_text(
+        "find_package(Threads)\nadd_executable(app src/main.cpp)\n",
+        encoding="utf-8",
+    )
+    (source_root / "main.cpp").write_text(
+        '#include <thread>\n#include "router.hpp"\nint main() { std::thread worker; return 0; }\n',
+        encoding="utf-8",
+    )
+
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data", workspace, git_executable=sys.executable
+    )
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="cpp-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "completed"
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    adapters = {
+        str(row[0]): str(row[1])
+        for row in connection.execute(
+            "SELECT a.relative_path, sr.adapter_id "
+            "FROM source_artifacts AS a "
+            "JOIN source_revisions AS sr ON sr.artifact_id = a.artifact_id "
+            "ORDER BY a.relative_path"
+        )
+    }
+    evidence_kinds = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT evidence_kind FROM evidence WHERE evidence_kind IN "
+            "('module_dependency', 'technology_usage', 'symbol_definition', 'entry_point')"
+        )
+    }
+    connection.close()
+
+    assert adapters["CMakeLists.txt"] == "cpp"
+    assert adapters["src/main.cpp"] == "cpp"
+    assert {"module_dependency", "technology_usage", "symbol_definition", "entry_point"} <= {
+        *evidence_kinds
+    }
 
 
 def test_refresh_fast_reuses_metadata_but_verify_content_detects_same_stat_change(
@@ -549,11 +633,25 @@ def test_scan_rejects_a_receipt_scope_for_a_different_workspace_before_creating_
         capability=capability,
         request=request,
     )
-    read_fd, write_fd = os.pipe()
-    try:
-        os.write(write_fd, capability)
-    finally:
-        os.close(write_fd)
+    read_fd: int | None = None
+    if sys.platform == "win32":
+        from goodjob.platform.capability_windows import WindowsTransferPipe, write_handle
+
+        transfer = WindowsTransferPipe.create()
+        try:
+            write_handle(transfer.parent_write.value, capability)
+            transfer.parent_write.close()
+            capability_argument = ["--capability-handle", str(transfer.child_read.detach())]
+        except BaseException:
+            transfer.close()
+            raise
+    else:
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, capability)
+        finally:
+            os.close(write_fd)
+        capability_argument = ["--capability-fd", str(read_fd)]
     try:
         exit_code = run(
             [
@@ -572,12 +670,12 @@ def test_scan_rejects_a_receipt_scope_for_a_different_workspace_before_creating_
                 json.dumps(_scope(authorized_workspace)),
                 "--notice-version",
                 NOTICE_VERSION,
-                "--capability-fd",
-                str(read_fd),
+                *capability_argument,
             ]
         )
     finally:
-        os.close(read_fd)
+        if read_fd is not None:
+            os.close(read_fd)
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "authorization scope does not match" in captured.err
@@ -592,7 +690,30 @@ def test_scan_with_an_authorized_missing_root_performs_no_workspace_or_run_write
     missing_workspace = tmp_path / "missing"
     data_dir = tmp_path / "data"
     broker = _broker(data_dir)
-    authorized, validation_sha256 = _authorize_source(broker, missing_workspace)
+    validation_sha256 = ""
+    if sys.platform != "win32":
+        authorized, validation_sha256 = _authorize_source(broker, missing_workspace)
+    else:
+        authorized = _send_json(
+            broker,
+            {
+                "op": "authorize_source_analysis",
+                "workspace": str(missing_workspace),
+                "confirmed": True,
+            },
+        )
+    if sys.platform == "win32":
+        _close_broker(broker)
+        assert authorized["status"] == "error"
+        database_file = data_dir / "goodjob.sqlite3"
+        if database_file.exists():
+            connection = sqlite3.connect(database_file)
+            workspace_count = connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0]
+            scan_run_count = connection.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0]
+            connection.close()
+            assert workspace_count == 0
+            assert scan_run_count == 0
+        return
     receipt = _object_field(authorized, "receipt")
     response = _send_json(
         broker,
@@ -628,9 +749,9 @@ def test_descriptor_reader_rejects_a_file_or_directory_symlink(tmp_path: Path) -
         _open_regular_file(workspace, "file.py")
     with pytest.raises(OSError):
         _open_regular_file(workspace, "directory/secret.py")
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, InvalidInputError)):
         _open_regular_file(workspace, str((outside / "secret.py").resolve()))
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, InvalidInputError)):
         _open_regular_file(workspace, "../outside/secret.py")
 
 
@@ -958,7 +1079,7 @@ def test_root_external_linked_worktree_requires_two_stage_authorization_and_neve
     assert relation_scope["git_dir_candidate"] == candidate["git_dir_candidate"]
     assert relation_scope["common_dir_candidate"] is None
     original_pointer = pointer.read_text(encoding="utf-8")
-    pointer.write_text(f"gitdir: {tmp_path / 'replacement-git-dir'}\n", encoding="utf-8")
+    _rewrite_git_pointer(pointer, f"gitdir: {tmp_path / 'replacement-git-dir'}\n")
     rejected_replacement = _send_json(
         broker,
         {
@@ -972,7 +1093,7 @@ def test_root_external_linked_worktree_requires_two_stage_authorization_and_neve
     assert rejected_replacement["status"] == "error"
     assert rejected_replacement["code"] == "invalid_input"
     assert not audit.exists()
-    pointer.write_text(original_pointer, encoding="utf-8")
+    _rewrite_git_pointer(pointer, original_pointer)
     probed = _send_json(
         broker,
         {
@@ -1021,7 +1142,7 @@ def test_root_external_linked_worktree_requires_two_stage_authorization_and_neve
     assert metadata_scope["marker_kind"] == "file"
     assert metadata_scope["git_dir_device"] == relation["git_dir_device"]
     assert metadata_scope["git_dir_inode"] == relation["git_dir_inode"]
-    pointer.write_text(f"gitdir: {tmp_path / 'post-grant-replacement'}\n", encoding="utf-8")
+    _rewrite_git_pointer(pointer, f"gitdir: {tmp_path / 'post-grant-replacement'}\n")
     rejected_after_metadata = _send_json(
         broker,
         {
@@ -1039,7 +1160,7 @@ def test_root_external_linked_worktree_requires_two_stage_authorization_and_neve
         for issue in rejected_after_metadata_issues
     )
     assert not audit.exists()
-    pointer.write_text(original_pointer, encoding="utf-8")
+    _rewrite_git_pointer(pointer, original_pointer)
     (outside_repository / ".git" / "config").write_text(
         "this is intentionally invalid Git config\n", encoding="utf-8"
     )
@@ -1539,6 +1660,112 @@ def test_internal_git_config_cannot_read_an_include_outside_the_authorized_works
     assert "invalid external config" not in database_text
 
 
+def test_repo_manifest_metadata_escape_is_one_repository_level_diagnostic(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repository = workspace / "repository"
+    (workspace / ".repo" / "projects").mkdir(parents=True)
+    repository.mkdir(parents=True)
+    _git_init(repository)
+    (repository / "pyproject.toml").write_text(
+        "[project]\nname='repo-manifest'\n",
+        encoding="utf-8",
+    )
+    outside_config = tmp_path / "outside-config"
+    outside_config.write_text("repo-manifest-private-sentinel\n", encoding="utf-8")
+    (repository / ".git" / "config").unlink()
+    (repository / ".git" / "config").symlink_to(outside_config)
+
+    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace)
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="repo-manifest-escape-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "failed"
+    assert result.coverage["fresh_projects"] == 0
+    layout_issues = [
+        issue for issue in result.issues if issue.kind == "unsupported_repository_layout"
+    ]
+    assert len(layout_issues) == 1
+    assert "repository/.git/config" in layout_issues[0].message
+    assert not any(issue.kind == "symlink_skipped" for issue in result.issues)
+    database_text = (
+        (tmp_path / "data" / "goodjob.sqlite3").read_bytes().decode("utf-8", errors="ignore")
+    )
+    assert "repo-manifest-private-sentinel" not in database_text
+
+
+def test_repo_manifest_metadata_inside_authorized_root_remains_scannable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repository = workspace / "repository"
+    metadata_root = workspace / ".repo" / "projects"
+    metadata_root.mkdir(parents=True)
+    repository.mkdir(parents=True)
+    _git_init(repository)
+    (repository / "pyproject.toml").write_text(
+        "[project]\nname='repo-manifest-internal'\n",
+        encoding="utf-8",
+    )
+    config_target = metadata_root / "repository-config"
+    config_target.write_text((repository / ".git" / "config").read_text(encoding="utf-8"))
+    (repository / ".git" / "config").unlink()
+    (repository / ".git" / "config").symlink_to(Path("../../.repo/projects/repository-config"))
+
+    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace)
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="repo-manifest-internal-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "completed"
+    assert result.coverage["fresh_projects"] == 1
+    assert not any(issue.kind == "unsupported_repository_layout" for issue in result.issues)
+
+
+def test_direct_scanner_fails_before_discovery_for_unsupported_filesystem(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    filesystem = FilesystemProbeResult(
+        status="unsupported",
+        filesystem_type="sshfs",
+        flags=0,
+        message="fixture workspace filesystem is unsupported",
+        remediation="select a local workspace",
+    )
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data",
+        workspace,
+        git_executable=sys.executable,
+        filesystem_probe=lambda _path: filesystem,
+    )
+
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="filesystem-preflight-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "failed"
+    assert result.coverage["fresh_projects"] == 0
+    assert [issue.kind for issue in result.issues] == ["workspace_filesystem_unsupported"]
+    assert result.issues[0].message == filesystem.message
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    assert (
+        connection.execute("SELECT COUNT(*) FROM scan_runs WHERE status = 'failed'").fetchone()[0]
+        == 1
+    )
+    assert connection.execute("SELECT COUNT(*) FROM scan_issues").fetchone()[0] == 1
+    connection.close()
+
+
 def test_internal_git_config_can_include_a_file_inside_the_authorized_workspace(
     tmp_path: Path,
 ) -> None:
@@ -1610,6 +1837,7 @@ def test_internal_git_worktree_config_cannot_include_a_root_external_file(
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group regression")
 def test_bounded_git_runner_kills_timeout_and_output_flood(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2600,3 +2828,141 @@ def test_ignore_approximations_are_visible_in_coverage_without_failing_scan(
     }
     unsupported = [issue for issue in result.issues if issue.kind == "ignore_pattern_unsupported"]
     assert len(unsupported) == 3
+
+
+def test_scan_overview_groups_repetitive_issues_and_retains_audit_records(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "package.json").write_text("{}", encoding="utf-8")
+
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data", workspace, git_executable=sys.executable
+    )
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="test-v1",
+        authorization_receipt_id=receipt_id,
+    )
+    assert result.status == "completed"
+
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    scan_run_id = result.scan_run_id
+
+    # Insert 1 error, 2 warnings, and 1096 symlink_skipped info issues
+    connection.execute(
+        """
+        INSERT INTO scan_issues (
+            issue_id, scan_run_id, project_id, artifact_id, kind,
+            severity, relative_path, message, remediation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            scan_run_id,
+            None,
+            None,
+            "permission_denied",
+            "error",
+            "critical/secret.key",
+            "Cannot access file due to permissions.",
+            "Fix filesystem permissions.",
+        ),
+    )
+    for index in range(2):
+        connection.execute(
+            """
+            INSERT INTO scan_issues (
+                issue_id, scan_run_id, project_id, artifact_id, kind,
+                severity, relative_path, message, remediation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                scan_run_id,
+                None,
+                None,
+                "broken_repository",
+                "warning",
+                f"repo_{index}/.git",
+                f"Git repository {index} metadata is corrupt.",
+                "Reclone or check Git repository state.",
+            ),
+        )
+    for index in range(1096):
+        connection.execute(
+            """
+            INSERT INTO scan_issues (
+                issue_id, scan_run_id, project_id, artifact_id, kind,
+                severity, relative_path, message, remediation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                scan_run_id,
+                None,
+                None,
+                "symlink_skipped",
+                "info",
+                f".repo/projects/manifest_{index}.git",
+                "Skipped symbolic link during scan discovery.",
+                "Review symlink targets or authorize manifest root.",
+            ),
+        )
+    connection.commit()
+    connection.close()
+
+    overview = scanner.overview(workspace_path=str(workspace), scan_run_id=scan_run_id)
+    scan_overview = _object_field(overview, "scan_overview")
+
+    assert scan_overview["contract_version"] == "scan-overview-v2"
+    assert scan_overview["found"] is True
+
+    limits = _object_field(scan_overview, "limits")
+    assert limits["available_issues"] == 1099
+    assert limits["error_count"] == 1
+    assert limits["warning_count"] == 2
+    assert limits["info_count"] == 1096
+    assert limits["issues_truncated"] is True
+    assert limits["issue_limit"] == 200
+
+    issues = cast(list[dict[str, object]], scan_overview["issues"])
+    assert len(issues) == 200
+    # Error and warnings must come first
+    assert issues[0]["severity"] == "error"
+    assert issues[0]["kind"] == "permission_denied"
+    assert issues[1]["severity"] == "warning"
+    assert issues[2]["severity"] == "warning"
+    # The rest are info
+    assert all(item["severity"] == "info" for item in issues[3:])
+
+    groups = cast(list[dict[str, object]], scan_overview["issue_groups"])
+    assert len(groups) == 3
+    # Ordered by severity (error -> warning -> info)
+    assert groups[0]["severity"] == "error"
+    assert groups[0]["kind"] == "permission_denied"
+    assert groups[0]["count"] == 1
+    assert len(cast(list[object], groups[0]["samples"])) == 1
+    assert groups[0]["omitted_count"] == 0
+
+    assert groups[1]["severity"] == "warning"
+    assert groups[1]["kind"] == "broken_repository"
+    assert groups[1]["count"] == 2
+    assert len(cast(list[object], groups[1]["samples"])) == 2
+    assert groups[1]["omitted_count"] == 0
+
+    assert groups[2]["severity"] == "info"
+    assert groups[2]["kind"] == "symlink_skipped"
+    assert groups[2]["count"] == 1096
+    assert len(cast(list[object], groups[2]["samples"])) == 3
+    assert groups[2]["omitted_count"] == 1093
+
+    # Audit verification: all 1099 issues remain in SQLite
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    total_stored = connection.execute(
+        "SELECT COUNT(*) FROM scan_issues WHERE scan_run_id = ?",
+        (scan_run_id,),
+    ).fetchone()[0]
+    connection.close()
+    assert total_stored == 1099

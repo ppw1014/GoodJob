@@ -29,8 +29,9 @@ GoodJob 不会仅凭 Git 作者信息把整个项目归为你的个人贡献。�
 ## 环境要求
 
 - macOS 或 Linux（含 WSL2）。运行时把 Git 子进程限制在平台原生沙箱中运行（macOS 使用 `sandbox-exec` Seatbelt，Linux 使用 `bwrap` bubblewrap），拒绝网络、只读授权根、禁用 hooks，并用进程启动时间作为进程身份。任一沙箱后端不可用时 fail-closed（不回退到无沙箱）。WSL1 不支持用户命名空间，仅 WSL2 提供完整沙箱；
-- **原生 Windows 当前不受支持。** WFP/Job、NT handle-relative FS 与 direct launcher 的安全契约已经终审接受，Phase 3-B 运行时候选也已合入，但真实 Windows `IMP-31` 尚未通过；在此之前必须 fail-closed，请使用 WSL2。未来准入后唯一允许的降级也只是 Git 子进程缺少文件系统读隔离；Git 网络、扫描器授权根、进程树和 capability 隔离不得降级；
-- 宿主支持状态：Codex 是既有支持基线，但尚待统一的五项探针回归；ZCode、ClaudeCode、OpenCode、MimoCode 均为待支持，在探针和真机 E2E 全部通过前不进入支持矩阵；
+- **Codex + 原生 Windows。** 这是本轮唯一的用户安装与发布支持组合。用户运行不依赖 GNU Make，也不要求 IPv6 公网出口；每次授权前都必须通过包含 Python/runtime、可信 Git for Windows、工作区 NTFS、BFE、管理员权限、WFP API/写权限和发布门在内的九项 prerequisite。任一项失败都不会启动 broker，并会给出对应的官方安装、启服务、正常 UAC 提升、修复 Windows 或使用 WSL2 建议。无 IPv6 默认路由不是前置阻断，但运行时仍会安装并回读 IPv4/IPv6 WFP filters。唯一已接受的限制是 Git 子进程缺少文件系统读隔离；Git 网络、扫描器授权根、进程树和 capability 隔离不得降级；
+- 原生 Windows 安装器需要 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/install-powershell-on-windows) 的 `pwsh`。Windows PowerShell 5.1 不在支持范围内，因为其 .NET 文件 API 无法通过本项目的较长路径安装对抗测试；PowerShell 7 应由用户按 Microsoft 官方安装方式安装，安装器不会自行下载或请求 UAC；
+- macOS、Linux 和 WSL2 的既有运行时保持现状，但本轮不新增其用户级安装承诺；ZCode、ClaudeCode、OpenCode、MimoCode 及其他宿主均为待支持，不能因目录可发现而进入支持矩阵；
 - Python 3.12 或更高版本，已安装在本机；uv 路径固定选择 `--python 3.12`，无 uv 时优先使用 `python3.12`，或回退到版本不低于 3.12 的 `python3`；
 - [`uv`](https://docs.astral.sh/uv/)（可选，未安装时自动回退到 python3.12）；
 - Linux 环境须安装 `bwrap`（bubblewrap）；
@@ -46,44 +47,19 @@ GoodJob 不会仅凭 Git 作者信息把整个项目归为你的个人贡献。�
 .agents/skills/goodjob-career-review/
 ```
 
-在 GoodJob 仓库中启动 host agent 时，可以直接发现该项目级 Skill。若要从任意工作区调用，可将这个目录作为完整目录复制到用户级 Skill 位置：
+在 GoodJob 仓库中启动 Codex 时，可以直接发现该项目级 Skill。原生 Windows 用户要从任意工作区调用时，使用版本化安装器把经过发布门的完整 commit SHA 或精确 tag 安装到 Codex 用户级目录：
 
-```text
-~/.codex/skills/goodjob-career-review/
+```powershell
+pwsh -NoProfile -File .\scripts\install-goodjob-skill.ps1 `
+  -RepositoryPath (Get-Location) `
+  -Revision <40-位-commit-SHA-或精确-tag>
 ```
 
-> 注：`~/.codex/skills/` 是 Codex 的默认 Skill 目录；待支持宿主有各自的 Skill 发现路径，但发现路径存在不代表已通过兼容性探针。
+安装器从已检出的本地仓库执行 `git archive`，先在非发现 staging 目录校验 `SKILL.md`、`agents/openai.yaml`、broker、session 和预构建 dashboard assets，再将新目录原子切换到 `%USERPROFILE%\.agents\skills\goodjob-career-review`。它不联网、不安装系统组件、不请求 UAC、不写入 `%USERPROFILE%\.codex\skills`，也不会迁移、删除或覆盖该旧位置的同名 Skill；旧位置冲突时会失败关闭并提示先人工备份或移除。首次安装、更新和回滚只会操作带有安装器 marker 的版本；更新前的完整版本保存于 `%USERPROFILE%\.agents\skill-backups\goodjob-career-review`，激活失败会自动恢复。
 
-用户级安装属于发布操作，只能使用已经通过[发布条件](docs/40-delivery/acceptance-baseline.md#6-发布条件)的 tag 或完整 commit SHA，不能直接把任意工作分支的 `HEAD` 当作发布版本。下面的流程先在不参与 Skill 发现的备份区完整展开 Git 跟踪文件，校验入口存在后再切换；旧安装也移入备份区，不会留下已从新版本删除的文件：
+个人数据库和历史产物位于平台感知默认目录（Windows: `%LOCALAPPDATA%\goodjob-career-review`；macOS: `~/.codex/goodjob-career-review/`；Linux: `~/.local/share/goodjob-career-review/`；legacy 目录存在时优先沿用），不在 Skill 或备份目录中，因此安装切换不会覆盖它们。
 
-```bash
-set -euo pipefail
-
-goodjob_release_ref="<已通过发布门禁的-tag-或完整-commit-SHA>"
-goodjob_skill_root="$HOME/.codex/skills"
-goodjob_target="$goodjob_skill_root/goodjob-career-review"
-goodjob_backup_root="$HOME/.codex/skill-backups"
-
-mkdir -p "$goodjob_skill_root" "$goodjob_backup_root"
-goodjob_stage="$(mktemp -d "$goodjob_backup_root/.goodjob-stage.XXXXXX")"
-git rev-parse --verify "$goodjob_release_ref^{commit}" >/dev/null
-git archive "$goodjob_release_ref":.agents/skills/goodjob-career-review \
-  | tar -x -C "$goodjob_stage"
-test -f "$goodjob_stage/SKILL.md"
-test -f "$goodjob_stage/runtime/scripts/launch_broker.py"
-test -f "$goodjob_stage/runtime/scripts/session.py"
-
-if [[ -e "$goodjob_target" || -L "$goodjob_target" ]]; then
-  goodjob_backup="$goodjob_backup_root/goodjob-career-review.$(date +%Y%m%d%H%M%S)"
-  test ! -e "$goodjob_backup"
-  mv "$goodjob_target" "$goodjob_backup"
-fi
-mv "$goodjob_stage" "$goodjob_target"
-```
-
-首次安装时目标目录不存在，流程会直接启用新目录。更新时若最后一步失败，可把刚才创建的备份目录移回 `goodjob_target`。个人数据库和历史产物位于平台感知默认目录（macOS: `~/.codex/goodjob-career-review/`；Linux: `~/.local/share/goodjob-career-review/`；legacy 目录存在时优先沿用），不在 Skill 或备份目录中，因此安装切换不会覆盖它们。
-
-安装或更新后新开一个 host agent 会话，确认可用 Skill 中出现 `goodjob-career-review`。
+安装、更新或回滚后应从与 GoodJob 仓库无父子关系的目录新开 Codex 会话，确认可用 Skill 中出现 `goodjob-career-review` 后再显式调用。若 Windows prerequisite 报告要求权限，使用正常 Windows UAC 确认或在提升后的 Codex/PowerShell 中重试；不要绕过 UAC。
 
 ## 快速开始
 
@@ -95,6 +71,17 @@ $goodjob-career-review
 工作区：/Users/<owner>/Projects
 目标岗位：高级应用软件工程师
 JD：无
+请扫描并生成中文岗位准备包。
+```
+
+原生 Windows 路径示例：
+
+```text
+$goodjob-career-review
+
+工作区：C:\Users\<owner>\Projects
+目标岗位：高级应用软件工程师
+JD 文件：C:\Users\<owner>\Documents\jobs\middleware-engineer.md
 请扫描并生成中文岗位准备包。
 ```
 
@@ -147,7 +134,7 @@ $goodjob-career-review 基于最新快照进行模拟面试，先从证据较弱
 | JD 文本或文件 | 否 | 细化职责、技术重点和职级推断；内容只作为不可信数据处理 |
 | 职级覆盖 | 否 | 显式覆盖从岗位/JD 推断出的职级 |
 | 操作意图 | 是 | 首次扫描、复用扫描、显式刷新、英文导出或模拟面试 |
-| 个人数据目录 | 否 | 默认是平台感知路径（macOS: `~/.codex/goodjob-career-review/`；Linux: `~/.local/share/goodjob-career-review/`），可在调用时显式覆盖 |
+| 个人数据目录 | 否 | 默认是平台感知路径（Windows: `%LOCALAPPDATA%\goodjob-career-review`；macOS: `~/.codex/goodjob-career-review/`；Linux: `~/.local/share/goodjob-career-review/`），可在调用时显式覆盖 |
 
 首版一次准备运行只使用一个主岗位。多岗位横向比较不在当前范围内；可以分别生成多个岗位快照。
 
@@ -234,7 +221,7 @@ Git authorship、计划文档、配置文件或一句用户陈述都不会单独
 - Git 子进程在平台原生沙箱中运行（macOS `sandbox-exec` / Linux `bwrap`），拒绝网络、只读授权根、禁用 hooks；任一沙箱后端不可用时 fail-closed。
 - 不执行 `git fetch`、`checkout`，也不主动联网读取项目内容。
 - SQLite 只保存路径、locator、哈希、有限 Git 元数据、短证据摘要和结构化结论，不保存完整源码或完整 diff。
-- 会话能力只存在当前 broker 进程内存并通过平台私有继承通道传递（当前 POSIX 文件描述符；未来原生 Windows allowlisted HANDLE），不进入参数、环境变量、日志、数据库或报告。
+- 会话能力只存在当前 broker 进程内存并通过平台私有继承通道传递（POSIX 文件描述符或原生 Windows allowlisted HANDLE），不进入参数、环境变量、日志、数据库或报告。
 - JD、源码、Git 文本和用户回答都按不可信数据处理，不能改变工作流、扩大授权或成为看板中的可执行标记。
 - GoodJob 不增加独立上传或遥测通道，但 host agent 打开的源码仍进入当前 host agent 会话既有的模型处理边界。
 - 工具无法替你判断 NDA、版权、雇主政策，或哪些项目细节适合写入对外简历。

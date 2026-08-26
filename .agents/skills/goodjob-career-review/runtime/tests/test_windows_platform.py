@@ -1035,6 +1035,7 @@ def test_windows_publish_verifies_through_the_fixed_temp_handle(
 ) -> None:
     opened: list[tuple[int, str, int]] = []
     renamed: list[tuple[int, int, str]] = []
+    read_only_handles: list[int] = []
     outside_sentinel = {"touched": False}
 
     class FakeRoot:
@@ -1081,6 +1082,7 @@ def test_windows_publish_verifies_through_the_fixed_temp_handle(
     monkeypatch.setattr(fs_windows, "write_new_file_at", lambda *_args: None)
     monkeypatch.setattr(fs_windows, "_list_handle", list_handle)
     monkeypatch.setattr(fs_windows, "_read_handle_bounded", read_handle)
+    monkeypatch.setattr(fs_windows, "_mark_read_only", read_only_handles.append)
     monkeypatch.setattr(
         fs_windows,
         "_rename_handle",
@@ -1104,6 +1106,7 @@ def test_windows_publish_verifies_through_the_fixed_temp_handle(
 
     assert not outside_sentinel["touched"]
     assert renamed == [(100, 20, "final")]
+    assert read_only_handles == [101, 100]
     assert all(parent in {10, 100} for parent, _name, _disposition in opened)
 
 

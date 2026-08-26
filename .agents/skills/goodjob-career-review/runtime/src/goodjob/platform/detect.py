@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from goodjob.errors import GoodJobError, UnsupportedPlatformError
 
-NATIVE_WINDOWS_RELEASE_ENABLED = False
+NATIVE_WINDOWS_RELEASE_ENABLED = True
 
 if TYPE_CHECKING:
     from goodjob.git_metadata import InternalGitBinding
@@ -54,7 +54,7 @@ def detect_platform() -> Platform:
 
 
 def require_released_runtime() -> None:
-    """Keep native Windows closed until the IMP-31 release decision is committed."""
+    """Reject native Windows when the persistent release gate is disabled."""
     if detect_platform() == Platform.WINDOWS and not NATIVE_WINDOWS_RELEASE_ENABLED:
         raise UnsupportedPlatformError(
             "native Windows remains unsupported until IMP-31A-G pass on real hardware; use WSL2"

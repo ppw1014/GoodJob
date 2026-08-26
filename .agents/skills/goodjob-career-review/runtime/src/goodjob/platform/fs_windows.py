@@ -47,9 +47,11 @@ OBJ_CASE_INSENSITIVE = 0x00000040
 OPEN_EXISTING = 3
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+FILE_ATTRIBUTE_READONLY = 0x00000001
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 FILE_ATTRIBUTE_NORMAL = 0x00000080
+FILE_BASIC_INFO_CLASS = 0
 FILE_ID_INFO_CLASS = 18
 FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 FILE_NAME_INFO_CLASS = 2
@@ -85,6 +87,16 @@ class FILE_ID_INFO(ctypes.Structure):
 
 class FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
     _fields_ = [("FileAttributes", ctypes.c_uint32), ("ReparseTag", ctypes.c_uint32)]
+
+
+class FILE_BASIC_INFO(ctypes.Structure):
+    _fields_ = [
+        ("CreationTime", ctypes.c_int64),
+        ("LastAccessTime", ctypes.c_int64),
+        ("LastWriteTime", ctypes.c_int64),
+        ("ChangeTime", ctypes.c_int64),
+        ("FileAttributes", ctypes.c_uint32),
+    ]
 
 
 class FILE_STANDARD_INFO(ctypes.Structure):
@@ -362,6 +374,20 @@ def _attributes(handle: int) -> FILE_ATTRIBUTE_TAG_INFO:
     ):
         raise OSError(last_error(), "GetFileInformationByHandleEx(FileAttributeTagInfo)")
     return info
+
+
+def _mark_read_only(handle: int) -> None:
+    info = FILE_BASIC_INFO()
+    api = _kernel32()
+    if not api.GetFileInformationByHandleEx(
+        ctypes.c_void_p(handle), FILE_BASIC_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        raise OSError(last_error(), "GetFileInformationByHandleEx(FileBasicInfo)")
+    info.FileAttributes |= FILE_ATTRIBUTE_READONLY
+    if not api.SetFileInformationByHandle(
+        ctypes.c_void_p(handle), FILE_BASIC_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        raise OSError(last_error(), "SetFileInformationByHandle(FileBasicInfo)")
 
 
 def _standard_info(handle: int) -> FILE_STANDARD_INFO:
@@ -1117,6 +1143,15 @@ class WindowsDataTree:
                         temp.value, {name: len(content) for name, content in files.items()}
                     )
                 )
+                for name in files:
+                    with _open_relative(
+                        temp.value,
+                        name,
+                        access=FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                        directory=False,
+                    ) as file_handle:
+                        _mark_read_only(file_handle.value)
+                _mark_read_only(temp.value)
                 if before_rename is not None:
                     before_rename()
                 if _identity(temp.value).volume_serial != _identity(final_parent).volume_serial:

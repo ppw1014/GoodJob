@@ -24,6 +24,15 @@ from goodjob.platform import handles_windows, process_windows
 from goodjob.platform.handles_windows import OwnedHandle
 from goodjob.reporting import ArtifactSnapshotService
 
+
+def _is_read_only(path: Path, *, directory: bool = False) -> bool:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if sys.platform == "win32":
+        return not mode & stat.S_IWUSR
+    expected = stat.S_IRUSR | (stat.S_IXUSR if directory else 0)
+    return mode == expected
+
+
 _ABRUPT_EXIT_CODE = 86
 
 _ABRUPT_EXIT_EXPORT_SCRIPT = r"""
@@ -343,11 +352,8 @@ def test_translation_publish_atomically_creates_one_immutable_derived_export(
         "manifest.json",
     }
     assert all(path.is_file() for path in (resume_path, interview_path, manifest_path))
-    assert all(
-        stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR
-        for path in (resume_path, interview_path, manifest_path)
-    )
-    assert stat.S_IMODE(output_path.stat().st_mode) == stat.S_IRUSR | stat.S_IXUSR
+    assert all(_is_read_only(path) for path in (resume_path, interview_path, manifest_path))
+    assert _is_read_only(output_path, directory=True)
     assert "Python" in resume_path.read_text(encoding="utf-8")
     assert "How is" in interview_path.read_text(encoding="utf-8")
     assert not list(output_path.glob("*.html"))

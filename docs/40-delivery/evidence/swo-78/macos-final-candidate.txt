@@ -1,0 +1,66 @@
+SWO-78 macOS final-candidate evidence
+collected_at_utc=2026-08-19T06:54:15+00:00
+executor=Implementer-Sol / Multica Codex runtime / DamiendeMacBook-Air.local
+base=8c593001d46524d67dbe8c6e7ae5428fbcbef240
+base_tree=d36f2a84e58831ac9f9246f4b1320cdbf4009474
+head=13f3bd972d794653ee7ffda1f63ae02a3b46d59d
+tree=8805fbdb27886f0d311cf23885ec0e23d27e548c
+working_tree_clean=True
+os_product=macOS
+os_version=26.5.1
+os_build=25F80
+kernel=Darwin DamiendeMacBook-Air.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:00 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8103 arm64
+architecture=arm64
+python_version=Python 3.12.13
+launcher_kind=uv
+uv_version=uv 0.11.16 (Homebrew 2026-05-21 aarch64-apple-darwin)
+workspace_tree_hash_before=c47fcb9054de741236d91520ea1b46622f47458176145771f7a9439a8ab3cc24
+home_tree_hash_before=8da7c09febe6371252e0c00cdbe5e4d464ac0e2219e194cec02bdd64000ec052
+data_dir_before=absent
+host_cache_policy=UV_CACHE_DIR and XDG_CACHE_HOME redirected outside sentinel HOME
+
+[ready preflight]
+command=<python-3.12.13> -I -B <runtime>/scripts/launch_broker.py --preflight-only --workspace <sentinel-workspace> --data-dir <sentinel-data-dir> --agent-runtime MAC_AGENT_RUNTIME_PRIVATE_12
+stdout_raw_begin
+{"can_start_broker": true, "checks": [{"id": "python_runtime", "message": "an isolated Python 3.12+ runtime is available", "status": "passed"}, {"id": "git_sandbox", "message": "the macos Git sandbox backend is available", "status": "passed"}], "contract_version": "launcher-preflight-v1", "launcher_kind": "uv", "notices": [], "platform": "macos", "status": "ok"}
+stdout_raw_end
+stderr_raw_begin
+stderr_raw_end
+exit_code=0
+strict_parser_accepted=true
+broker_process_max=0
+protected_entry_count=0
+
+[real unavailable sandbox boundary]
+command=/usr/bin/sandbox-exec -p <deny nested sandbox-exec process-exec> <python-3.12.13> -I -B <runtime>/scripts/launch_broker.py --preflight-only --workspace <sentinel-workspace> --data-dir <sentinel-data-dir> --agent-runtime MAC_AGENT_RUNTIME_PRIVATE_12
+stdout_raw_begin
+{"can_start_broker": false, "checks": [{"id": "python_runtime", "message": "an isolated Python 3.12+ runtime is available", "status": "passed"}, {"code": "unsupported_capability", "id": "git_sandbox", "message": "the mandatory macos Git sandbox backend is unavailable", "remediation": {"action": "repair_macos_runtime", "purpose": "establish the mandatory macOS Git sandbox", "requires_explicit_consent": false}, "status": "failed"}], "contract_version": "launcher-preflight-v1", "launcher_kind": "uv", "notices": [], "platform": "macos", "status": "error"}
+stdout_raw_end
+stderr_raw_begin
+stderr_raw_end
+exit_code=2
+strict_parser_accepted=true
+broker_process_max=0
+protected_entry_count=0
+
+[ordinary broker JSONL / EOF]
+command=<python-3.12.13> -I -B <runtime>/scripts/launch_broker.py --workspace <sentinel-workspace> --data-dir <sentinel-data-dir> --agent-runtime MAC_AGENT_RUNTIME_PRIVATE_12
+stdin_raw={}\n followed by EOF
+stdout_raw_begin
+{"code": "invalid_input", "message": "session broker field 'op' must be a non-empty string", "status": "error"}
+stdout_raw_end
+stderr_raw_begin
+stderr_raw_end
+exit_code=0
+live_broker_process_max=2
+protected_entry_count=0 (invalid_input rejected before protected operation)
+
+[postconditions]
+workspace_tree_hash_after=c47fcb9054de741236d91520ea1b46622f47458176145771f7a9439a8ab3cc24
+workspace_unchanged=true
+workspace_zero_read=not inferred from hash; covered by the audited process test
+home_tree_hash_after=8da7c09febe6371252e0c00cdbe5e4d464ac0e2219e194cec02bdd64000ec052
+home_unchanged=true
+data_dir_after=absent
+raw_sentinel_leak_count=0
+launcher_or_session_processes_after=0

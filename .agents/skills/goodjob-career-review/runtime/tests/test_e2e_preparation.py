@@ -39,15 +39,18 @@ def _list(value: object) -> list[object]:
 
 
 class _Broker:
-    def __init__(self, data_dir: Path, responses: list[dict[str, object]]) -> None:
+    def __init__(self, data_dir: Path, workspace: Path, responses: list[dict[str, object]]) -> None:
         self.responses = responses
+        command = [
+            sys.executable,
+            str(RUNTIME_DIR / "scripts" / "session.py"),
+            "--data-dir",
+            str(data_dir),
+        ]
+        if sys.platform == "win32":
+            command.extend(["--preflight-workspace", str(workspace)])
         self.process = subprocess.Popen(
-            [
-                sys.executable,
-                str(RUNTIME_DIR / "scripts" / "session.py"),
-                "--data-dir",
-                str(data_dir),
-            ],
+            command,
             cwd=RUNTIME_DIR,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -76,7 +79,11 @@ class _Broker:
         self.process.stdin.close()
         assert self.process.wait(timeout=5) == 0
         assert self.process.stderr is not None
-        assert self.process.stderr.read() == ""
+        stderr = self.process.stderr.read()
+        if sys.platform == "win32":
+            assert json.loads(stderr)["can_start_broker"] is True
+        else:
+            assert stderr == ""
 
 
 def _sha256(content: bytes) -> str:
@@ -98,6 +105,14 @@ def _tree_entries(root: Path) -> set[str]:
         path.relative_to(root).as_posix() + ("/" if path.is_dir() else "")
         for path in root.rglob("*")
     }
+
+
+def _is_read_only(path: Path, *, directory: bool = False) -> bool:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if sys.platform == "win32":
+        return not mode & stat.S_IWUSR
+    expected = stat.S_IRUSR | (stat.S_IXUSR if directory else 0)
+    return mode == expected
 
 
 def _assert_no_capability_keys(value: object) -> None:
@@ -176,7 +191,7 @@ def _open_session(
     responses: list[dict[str, object]],
     jd_sentinel: str,
 ) -> tuple[_Broker, str, object]:
-    broker = _Broker(data_dir, responses)
+    broker = _Broker(data_dir, workspace, responses)
     authorized = broker.ok("authorize_source_analysis", workspace=str(workspace), confirmed=True)
     receipt_id = cast(str, _dict(authorized["receipt"])["authorization_receipt_id"])
     validated = broker.ok(
@@ -738,8 +753,8 @@ def test_synthetic_workspace_full_chain_freezes_traceable_role_package(
             "manifest_path",
         )
     ]
-    assert all(stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR for path in snapshot_paths)
-    assert stat.S_IMODE(snapshot_dir.stat().st_mode) == stat.S_IRUSR | stat.S_IXUSR
+    assert all(_is_read_only(path) for path in snapshot_paths)
+    assert _is_read_only(snapshot_dir, directory=True)
     manifest_path = Path(cast(str, snapshot["manifest_path"]))
     manifest = _dict(json.loads(manifest_path.read_text(encoding="utf-8")))
     assert _sha256(manifest_path.read_bytes()) == snapshot["manifest_sha256"]
@@ -756,9 +771,9 @@ def test_synthetic_workspace_full_chain_freezes_traceable_role_package(
     latest = _dict(json.loads(Path(cast(str, rendered["latest_path"])).read_text()))
     for identity_key in ("artifact_snapshot_id", "preparation_run_id", "report_bundle_sha256"):
         assert latest[identity_key] == snapshot[identity_key]
-    report = Path(cast(str, snapshot["report_markdown_path"])).read_text()
-    resume = Path(cast(str, snapshot["resume_markdown_path"])).read_text()
-    html = Path(cast(str, snapshot["html_path"])).read_text()
+    report = Path(cast(str, snapshot["report_markdown_path"])).read_text(encoding="utf-8")
+    resume = Path(cast(str, snapshot["resume_markdown_path"])).read_text(encoding="utf-8")
+    html = Path(cast(str, snapshot["html_path"])).read_text(encoding="utf-8")
     assert all(cast(str, project["display_name"]) in report for project in coverage)
     assert all(text in report for text in CLAIM_TEXTS)
     assert all(heading in report for heading in ("如何实现", "学习要点", "STAR"))

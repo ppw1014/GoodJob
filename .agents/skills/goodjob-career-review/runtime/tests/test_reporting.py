@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
+import sys
 import uuid
 from pathlib import Path
 from typing import cast
@@ -31,6 +32,14 @@ from goodjob.reporting import (
 )
 from goodjob.review import ReviewService
 from goodjob.scanner import WorkspaceScanner
+
+
+def _is_read_only(path: Path, *, directory: bool = False) -> bool:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if sys.platform == "win32":
+        return not mode & stat.S_IWUSR
+    expected = stat.S_IRUSR | (stat.S_IXUSR if directory else 0)
+    return mode == expected
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -442,8 +451,8 @@ def test_report_bundle_and_snapshot_are_deterministic_safe_and_idempotent(
         Path(cast(str, snapshot["manifest_path"])),
     ]
     assert all(path.is_file() for path in paths)
-    assert all(stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR for path in paths)
-    assert stat.S_IMODE(paths[0].parent.stat().st_mode) == stat.S_IRUSR | stat.S_IXUSR
+    assert all(_is_read_only(path) for path in paths)
+    assert _is_read_only(paths[0].parent, directory=True)
     manifest = cast(dict[str, object], json.loads(paths[-1].read_text(encoding="utf-8")))
     assert manifest["report_bundle_sha256"] == first_bundle["bundle_sha256"]
     assert _latest(data_paths)["artifact_snapshot_id"] == snapshot["artifact_snapshot_id"]
@@ -695,10 +704,10 @@ def test_mock_review_rejects_invalid_artifact_snapshot(
     }
     html_path = Path(cast(str, snapshot["html_path"]))
     html_path.parent.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    html_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     if damage == "missing":
         html_path.unlink()
     elif damage == "tampered":
-        html_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         html_path.write_text("tampered", encoding="utf-8")
     else:
         outside = tmp_path / "outside.html"

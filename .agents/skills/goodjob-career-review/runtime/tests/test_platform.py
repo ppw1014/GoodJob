@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from goodjob.git_metadata import classify_git_command_failure
 from goodjob.platform import detect_platform, select_git_sandbox
 from goodjob.platform.detect import (
     GitSandboxUnavailableError,
@@ -23,6 +24,8 @@ def test_detect_platform_returns_current_platform() -> None:
         assert platform == Platform.MACOS
     elif sys.platform.startswith("linux"):
         assert platform == Platform.LINUX
+    elif sys.platform == "win32":
+        assert platform == Platform.WINDOWS
     else:
         pytest.skip(f"test does not cover platform: {sys.platform}")
 
@@ -41,7 +44,7 @@ def test_platform_from_sys_platform_rejects_unknown() -> None:
 
 def test_select_git_sandbox_returns_matching_backend() -> None:
     platform = detect_platform()
-    sandbox = select_git_sandbox("/usr/bin/git")
+    sandbox = select_git_sandbox(resolve_git_executable())
     if platform == Platform.MACOS:
         from goodjob.platform.sandbox_macos import SeatbeltSandbox
 
@@ -50,8 +53,10 @@ def test_select_git_sandbox_returns_matching_backend() -> None:
         from goodjob.platform.sandbox_linux import BwrapSandbox
 
         assert isinstance(sandbox, BwrapSandbox)
-    else:
-        pytest.skip(f"test does not cover platform: {platform}")
+    elif platform == Platform.WINDOWS:
+        from goodjob.platform.sandbox_windows import WfpGitSandbox
+
+        assert isinstance(sandbox, WfpGitSandbox)
 
 
 def test_git_executable_candidates_includes_platform_paths() -> None:
@@ -61,6 +66,8 @@ def test_git_executable_candidates_includes_platform_paths() -> None:
         assert any("Xcode" in str(c) for c in candidates)
     elif platform == Platform.LINUX:
         assert Path("/usr/bin/git") in candidates
+    elif platform == Platform.WINDOWS:
+        assert any(c.name.lower() == "git.exe" for c in candidates)
     assert len(candidates) > 0
 
 
@@ -94,12 +101,20 @@ def test_resolve_git_executable_never_uses_inherited_path(
     malicious.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
     malicious.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr(
-        "goodjob.platform.detect.git_executable_candidates",
-        lambda: (tmp_path / "missing-system-git",),
-    )
+    if sys.platform == "win32":
+        monkeypatch.setattr(
+            "goodjob.platform.sandbox_windows.windows_git_candidates",
+            lambda: (tmp_path / "missing-system-git.exe",),
+        )
+        expected_error = "trusted mingw64"
+    else:
+        monkeypatch.setattr(
+            "goodjob.platform.detect.git_executable_candidates",
+            lambda: (tmp_path / "missing-system-git",),
+        )
+        expected_error = "trusted system path"
 
-    with pytest.raises(GitSandboxUnavailableError, match="trusted system path"):
+    with pytest.raises(GitSandboxUnavailableError, match=expected_error):
         resolve_git_executable()
     assert not marker.exists()
 
@@ -120,6 +135,38 @@ def test_sandbox_failure_reason_only_classifies_launcher_failures(
         assert reason is None
     else:
         assert reason is not None and expected in reason
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "expected_kind"),
+    [
+        (128, "xcrun: error: invalid active developer path", "git_executable_unusable"),
+        (
+            128,
+            "fatal: unable to read /outside/gitconfig: Operation not permitted",
+            "git_executable_unusable",
+        ),
+        (
+            128,
+            "fatal: could not open '.git/config': Operation not permitted",
+            "git_repository_boundary_violation",
+        ),
+        (128, "fatal: not a git repository", "broken_repository"),
+        (127, "", "git_executable_unusable"),
+    ],
+)
+def test_git_failure_diagnosis_separates_toolchain_boundary_and_repository(
+    returncode: int, stderr: str, expected_kind: str
+) -> None:
+    diagnosis = classify_git_command_failure(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+    )
+
+    assert diagnosis.kind == expected_kind
+    assert diagnosis.message
+    assert diagnosis.remediation
 
 
 def test_git_state_reports_sandbox_unavailable_with_enablement_guidance(

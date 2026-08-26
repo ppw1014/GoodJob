@@ -1691,7 +1691,7 @@ def run(
                 "code": "invalid_input",
                 "message": "session broker input could not be processed safely",
             }
-        print(json.dumps(response, ensure_ascii=False, sort_keys=True), flush=True)
+        print(json.dumps(response, ensure_ascii=True, sort_keys=True), flush=True)
     return 0
 
 

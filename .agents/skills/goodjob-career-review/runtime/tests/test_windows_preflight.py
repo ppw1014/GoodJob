@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -105,6 +106,7 @@ def _runtime_tree(tmp_path: Path) -> Path:
     runtime = tmp_path / "runtime"
     (runtime / "scripts").mkdir(parents=True)
     (runtime / "src" / "goodjob").mkdir(parents=True)
+    (runtime / "scripts" / "broker_bootstrap.py").write_text("# bootstrap\n", encoding="utf-8")
     (runtime / "scripts" / "launch_broker.py").write_text("# launcher\n", encoding="utf-8")
     (runtime / "scripts" / "session.py").write_text("# broker\n", encoding="utf-8")
     (runtime / "scripts" / "windows_preflight.py").write_text("# preflight\n", encoding="utf-8")
@@ -182,6 +184,38 @@ def test_windows_preflight_classifies_every_failed_prerequisite(tmp_path: Path) 
         "source_url": "https://www.python.org/downloads/windows/",
         "requires_explicit_consent": True,
     }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["top", "passed_check", "failed_check", "remediation"],
+)
+def test_legacy_full_parser_rejects_unknown_fields(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    report = evaluate_windows_preflight(
+        workspace=tmp_path / "workspace",
+        runtime_dir=_runtime_tree(tmp_path),
+        python_version=(3, 12, 9),
+        launcher_kind="direct_python",
+        uv_available=False,
+        release_enabled=True,
+        probes=FakeWindowsProbes(elevated=False),
+    ).as_dict()
+    mutated = deepcopy(report)
+    if mutation == "top":
+        mutated["unexpected"] = True  # type: ignore[typeddict-unknown-key]
+    elif mutation == "passed_check":
+        mutated["checks"][0]["unexpected"] = True  # type: ignore[typeddict-unknown-key]
+    elif mutation == "failed_check":
+        failed = next(check for check in mutated["checks"] if check["status"] == "failed")
+        failed["unexpected"] = True  # type: ignore[typeddict-unknown-key]
+    else:
+        failed = next(check for check in mutated["checks"] if check["status"] == "failed")
+        failed["remediation"]["unexpected"] = True  # type: ignore[typeddict-unknown-key]
+
+    assert parse_windows_preflight_report(mutated) is None
 
 
 def test_windows_preflight_retries_after_installation_and_elevation(tmp_path: Path) -> None:

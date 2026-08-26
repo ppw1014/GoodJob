@@ -43,8 +43,13 @@ def _commit(repository: Path, message: str, committed_at: datetime) -> str:
 
 
 def _broker(data_dir: Path) -> subprocess.Popen[str]:
+    command = [sys.executable, "scripts/session.py", "--data-dir", str(data_dir)]
+    if sys.platform == "win32":
+        workspace = data_dir.parent / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        command.extend(["--preflight-workspace", str(workspace)])
     return subprocess.Popen(
-        [sys.executable, "scripts/session.py", "--data-dir", str(data_dir)],
+        command,
         cwd=RUNTIME_DIR,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -69,7 +74,11 @@ def _close_broker(process: subprocess.Popen[str]) -> None:
     process.stdin.close()
     assert process.wait(timeout=5) == 0
     assert process.stderr is not None
-    assert process.stderr.read() == ""
+    stderr = process.stderr.read()
+    if sys.platform == "win32":
+        assert json.loads(stderr)["can_start_broker"] is True
+    else:
+        assert stderr == ""
 
 
 def _object(payload: dict[str, object], key: str) -> dict[str, object]:

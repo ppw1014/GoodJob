@@ -15,6 +15,7 @@ MAX_COLLECTED_FACTS_PER_FILE = MAX_FACTS_PER_FILE * 2
 MAX_IDENTIFIER_LENGTH = 160
 MAX_TYPESCRIPT_IMPORT_STATEMENT = 4096
 ADAPTER_VERSIONS = {
+    "cpp": "cpp-v1",
     "dart": "dart-v1",
     "generic": "generic-v1",
     "python": "python-v1",
@@ -358,6 +359,188 @@ def _typescript_facts(text: str) -> list[AnalysisFact]:
     return facts
 
 
+_CPP_INCLUDE = re.compile(
+    r"^[ \t]*#[ \t]*include[ \t]*([<\"])([^>\"]+)[>\"]",
+    re.MULTILINE,
+)
+_CPP_TYPE = re.compile(
+    r"^[ \t]*(?:(?:template[ \t]*<[^{}\n]{0,200}>)[ \t]*)?"
+    r"(?P<kind>class|struct|enum(?:[ \t]+class)?|union)[ \t]+"
+    r"(?P<name>[A-Za-z_]\w*)\b",
+    re.MULTILINE,
+)
+_CPP_FUNCTION = re.compile(
+    r"^[ \t]*(?:(?:template[ \t]*<[^{}\n]{0,200}>)[ \t]*)?"
+    r"(?:(?:[A-Za-z_~][\w:<>*& ,]*)[ \t]+)?"
+    r"(?P<name>(?:(?:[A-Za-z_]\w*)::)*~?[A-Za-z_]\w*|operator[ \t]*[^\s(]+)"
+    r"[ \t]*\([^;{}\n]{0,4096}\)[ \t]*"
+    r"(?:const\b|constexpr\b|noexcept\b|override\b|final\b|&|&&|->[^{};]*)*"
+    r"[ \t]*\{",
+    re.MULTILINE,
+)
+_CPP_CONTROL_FUNCTION_NAMES = frozenset(
+    {"catch", "for", "if", "switch", "while", "sizeof", "static_assert"}
+)
+
+
+def _mask_cpp_literals(text: str) -> str | None:
+    """Blank C/C++ string and character literals while preserving line offsets."""
+    output = list(text)
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character not in "'\"":
+            index += 1
+            continue
+        quote = character
+        output[index] = " "
+        index += 1
+        escaped = False
+        while index < len(text):
+            current = text[index]
+            if current in "\n\r":
+                if not escaped:
+                    return None
+                escaped = False
+                index += 1
+                continue
+            if current != quote:
+                output[index] = " "
+            if escaped:
+                escaped = False
+            elif current == "\\":
+                escaped = True
+            elif current == quote:
+                output[index] = " "
+                index += 1
+                break
+            index += 1
+        else:
+            return None
+    return "".join(output)
+
+
+def _cpp_code_view(text: str) -> str | None:
+    comment_free = _without_comments(text, line_marker="//", quote_characters="'\"")
+    literal_free = _mask_cpp_literals(comment_free)
+    if literal_free is None:
+        return None
+    output = list(literal_free)
+    offset = 0
+    for line in literal_free.splitlines(keepends=True):
+        if line.lstrip().startswith("#"):
+            for index in range(offset, offset + len(line)):
+                if output[index] not in {"\n", "\r"}:
+                    output[index] = " "
+        offset += len(line)
+    return "".join(output)
+
+
+def _cpp_delimiters_are_balanced(text: str) -> bool:
+    pairs = {"}": "{", "]": "[", ")": "("}
+    opening = set(pairs.values())
+    stack: list[str] = []
+    for character in text:
+        if character in opening:
+            stack.append(character)
+        elif character in pairs and (not stack or stack.pop() != pairs[character]):
+            return False
+    return not stack
+
+
+def _cpp_facts(text: str) -> tuple[list[AnalysisFact], bool]:
+    facts: list[AnalysisFact] = []
+    comment_free = _without_comments(text, line_marker="//", quote_characters="'\"")
+    code_view = _cpp_code_view(text)
+    if code_view is None or not _cpp_delimiters_are_balanced(code_view):
+        return facts, False
+    line_starts = _line_starts(code_view)
+
+    for match in _CPP_INCLUDE.finditer(comment_free):
+        delimiter, header = match.groups()
+        dependency = header.split("/", 1)[0]
+        _append(
+            facts,
+            _fact(
+                "technology_usage" if delimiter == "<" else "module_dependency",
+                f"Includes C/C++ header {header}.",
+                line=_line_number(line_starts, match.start()),
+                dependency=dependency,
+                module=header,
+            ),
+        )
+    for match in _CPP_TYPE.finditer(code_view):
+        symbol_kind = "_".join(match.group("kind").split())
+        symbol = match.group("name")
+        _append(
+            facts,
+            _fact(
+                "symbol_definition",
+                f"Defines C/C++ {symbol_kind} {symbol}.",
+                line=_line_number(line_starts, match.start()),
+                symbol=symbol,
+                symbol_kind=symbol_kind,
+            ),
+        )
+    for match in _CPP_FUNCTION.finditer(code_view):
+        symbol = match.group("name")
+        simple_name = symbol.rsplit("::", 1)[-1]
+        if simple_name in _CPP_CONTROL_FUNCTION_NAMES:
+            continue
+        _append(
+            facts,
+            _fact(
+                "symbol_definition",
+                f"Defines C/C++ function {symbol}.",
+                line=_line_number(line_starts, match.start()),
+                symbol=symbol,
+                symbol_kind="function",
+            ),
+        )
+        if simple_name == "main":
+            _append(
+                facts,
+                _fact(
+                    "entry_point",
+                    "Defines a C/C++ process entry point.",
+                    line=_line_number(line_starts, match.start()),
+                    entry_kind="main",
+                ),
+            )
+    for token, capability in (
+        ("std::thread", "threading"),
+        ("std::async", "async"),
+        ("pthread_create", "threading"),
+        ("socket(", "network"),
+        ("connect(", "network"),
+        ("accept(", "network"),
+        ("fork(", "process"),
+        ("dlopen(", "dynamic_loading"),
+        ("sqlite3_open", "database"),
+    ):
+        position = code_view.find(token)
+        if position >= 0:
+            _append(
+                facts,
+                _fact(
+                    "capability_boundary",
+                    f"Uses a C/C++ {capability} capability.",
+                    line=_line_number(line_starts, position),
+                    capability=capability,
+                ),
+            )
+    if re.search(r"^[ \t]*(?:TEST(?:_F|_P)?|TEST_CASE)[ \t]*\(", code_view, re.MULTILINE):
+        _append(
+            facts,
+            _fact(
+                "test_definition",
+                "Defines C/C++ test cases.",
+                test_kind="cpp",
+            ),
+        )
+    return facts, True
+
+
 _RUST_USE = re.compile(
     r"^[ \t]*(?:pub\s+)?(?:use|extern\s+crate)\s+([A-Za-z_][\w:]*)",
     re.MULTILINE,
@@ -685,6 +868,45 @@ def _manifest_facts(filename: str, text: str, adapter_id: str) -> tuple[list[Ana
                         dependency_scope=pubspec_section,
                     ),
                 )
+    elif lower == "cmakelists.txt":
+        for pattern, evidence_kind, summary in (
+            (
+                r"\bfind_package\s*\(",
+                "dependency_declaration",
+                "Declares a C/C++ package lookup in CMake.",
+            ),
+            (
+                r"\badd_executable\s*\(",
+                "entry_configuration",
+                "Declares a C/C++ executable target in CMake.",
+            ),
+            (
+                r"\badd_library\s*\(",
+                "module_boundary",
+                "Declares a C/C++ library target in CMake.",
+            ),
+            (
+                r"\btarget_link_libraries\s*\(",
+                "dependency_declaration",
+                "Declares C/C++ target linkage in CMake.",
+            ),
+            (
+                r"\badd_subdirectory\s*\(",
+                "module_boundary",
+                "Declares a C/C++ subdirectory boundary in CMake.",
+            ),
+        ):
+            match = re.search(pattern, text)
+            if match is not None:
+                _append(
+                    facts,
+                    _fact(
+                        evidence_kind,
+                        summary,
+                        line=_line_number(_line_starts(text), match.start()),
+                        build_system="cmake",
+                    ),
+                )
     if adapter_id != "generic":
         _append(
             facts,
@@ -720,6 +942,8 @@ def analyze_file(
         facts, parsed = _python_facts(text)
     elif adapter_id == "typescript":
         facts = _typescript_facts(text)
+    elif adapter_id == "cpp":
+        facts, parsed = _cpp_facts(text)
     elif adapter_id == "rust":
         facts = _rust_facts(text)
     elif adapter_id == "dart":

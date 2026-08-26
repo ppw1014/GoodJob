@@ -9,9 +9,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import pytest
 
+from goodjob.platform import runtime_bootstrap
+from goodjob.platform.launcher_preflight import parse_launcher_preflight_report
 from goodjob.platform.preflight_windows import (
     WindowsPreflightReportDict,
     evaluate_windows_preflight,
@@ -45,28 +48,33 @@ def _load_session() -> ModuleType:
 @dataclass
 class LauncherProbes:
     elevated: bool
+    git_executable: Path | None = Path(r"C:\Program Files\Git\mingw64\bin\git.exe")
+    filesystem: str = "NTFS"
+    bfe: bool = True
+    wfp_api: bool = True
+    wfp_write: bool = True
 
     def retry_retained_cleanup(self) -> None:
         return None
 
     def trusted_git_executable(self) -> Path | None:
-        return Path(r"C:\Program Files\Git\mingw64\bin\git.exe")
+        return self.git_executable
 
     def workspace_filesystem(self, workspace: Path) -> str:
         del workspace
-        return "NTFS"
+        return self.filesystem
 
     def bfe_is_running(self) -> bool:
-        return True
+        return self.bfe
 
     def is_elevated(self) -> bool:
         return self.elevated
 
     def wfp_api_is_available(self) -> bool:
-        return True
+        return self.wfp_api
 
     def wfp_policy_write_access(self) -> bool:
-        return True
+        return self.wfp_write
 
     def runtime_modules_importable(self) -> bool:
         return True
@@ -96,15 +104,179 @@ class FakeRunner:
         return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
+def test_runtime_probe_decodes_utf8_independently_of_windows_code_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def record_run(command: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "Python 3.12.10", "")
+
+    monkeypatch.setattr(subprocess, "run", record_run)
+
+    result = runtime_bootstrap._run_command(
+        ["python", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5.0,
+    )
+
+    assert result.returncode == 0
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def _run_isolated_windows_launcher(
+    tmp_path: Path,
+    report: WindowsPreflightReportDict,
+    *,
+    preflight_only: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    launcher = Path(__file__).resolve().parents[1] / "scripts" / "launch_broker.py"
+    preflight = tmp_path / "windows_preflight.py"
+    broker = tmp_path / "session.py"
+    broker_marker = tmp_path / "broker-started"
+    preflight.write_text(
+        "import sys\n"
+        f"sys.stdout.write({json.dumps(report, sort_keys=True)!r} + '\\n')\n"
+        f"raise SystemExit({0 if report['can_start_broker'] else 2})\n",
+        encoding="utf-8",
+    )
+    broker.write_text(
+        "from pathlib import Path\n"
+        "class SessionBroker:\n"
+        "    def __init__(self, *args, **kwargs):\n"
+        f"        Path({str(broker_marker)!r}).write_text('started', encoding='utf-8')\n"
+        "def run(argv=None):\n"
+        "    SessionBroker(argv)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    wrapper = (
+        "import importlib.util,sys;"
+        "from pathlib import Path;"
+        "launcher_path,preflight_path,broker_path,workspace,preflight_only=sys.argv[1:];"
+        "spec=importlib.util.spec_from_file_location('isolated_windows_launcher',launcher_path);"
+        "module=importlib.util.module_from_spec(spec);"
+        "sys.modules[spec.name]=module;"
+        "spec.loader.exec_module(module);"
+        "module.WINDOWS_PREFLIGHT_SCRIPT=Path(preflight_path);"
+        "module.SESSION_SCRIPT=Path(broker_path);"
+        "module._discover_runtime=lambda _platform: module.PythonRuntime("
+        "(sys.executable,),'direct_python',tuple(sys.version_info[:3]));"
+        "arguments=['--workspace',workspace]+"
+        "(['--preflight-only'] if preflight_only=='true' else []);"
+        "raise SystemExit(module.run(arguments,platform_name='win32'))"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            wrapper,
+            str(launcher),
+            str(preflight),
+            str(broker),
+            str(tmp_path / "workspace"),
+            str(preflight_only).lower(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30.0,
+    )
+    return result, broker_marker.exists()
+
+
+def test_native_windows_release_is_enabled_in_fresh_isolated_python() -> None:
+    source_dir = Path(__file__).resolve().parents[1] / "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            (
+                "import sys;"
+                "sys.path.insert(0,sys.argv[1]);"
+                "from goodjob.platform.detect import NATIVE_WINDOWS_RELEASE_ENABLED;"
+                "print(str(NATIVE_WINDOWS_RELEASE_ENABLED).lower())"
+            ),
+            str(source_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30.0,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "true"
+
+
+@pytest.mark.parametrize(
+    "failed_check",
+    [None, "trusted_git", "workspace_filesystem", "bfe_service", "administrator", "wfp"],
+    ids=["all-nine-pass", "git", "ntfs", "bfe", "administrator", "wfp"],
+)
+@pytest.mark.parametrize("preflight_only", [False, True])
+def test_isolated_windows_launcher_starts_broker_only_after_all_nine_checks_pass(
+    tmp_path: Path,
+    failed_check: str | None,
+    preflight_only: bool,
+) -> None:
+    probes = LauncherProbes(elevated=True)
+    if failed_check == "trusted_git":
+        probes.git_executable = None
+    elif failed_check == "workspace_filesystem":
+        probes.filesystem = "ReFS"
+    elif failed_check == "bfe_service":
+        probes.bfe = False
+    elif failed_check == "administrator":
+        probes.elevated = False
+    elif failed_check == "wfp":
+        probes.wfp_write = False
+    report = evaluate_windows_preflight(
+        workspace=tmp_path / "workspace",
+        runtime_dir=Path(__file__).resolve().parents[1],
+        python_version=(
+            sys.version_info.major,
+            sys.version_info.minor,
+            sys.version_info.micro,
+        ),
+        launcher_kind="direct_python",
+        uv_available=False,
+        release_enabled=True,
+        probes=probes,
+    ).as_dict()
+
+    result, broker_started = _run_isolated_windows_launcher(
+        tmp_path, report, preflight_only=preflight_only
+    )
+
+    assert result.returncode == (0 if failed_check is None else 2), result.stderr
+    assert broker_started is (failed_check is None and not preflight_only)
+    if preflight_only:
+        emitted = json.loads(result.stdout)
+        assert parse_launcher_preflight_report(emitted) == emitted
+        assert emitted["checks"] == report["checks"]
+        assert emitted["notices"] == report["notices"]
+    if failed_check is not None:
+        assert report["can_start_broker"] is False
+
+
 def _write_windows_entry_shim(bin_dir: Path, name: str) -> Path:
-    shim = bin_dir / name
-    shim.write_text(
+    program = bin_dir / (f"{name}.py" if sys.platform == "win32" else name)
+    program.write_text(
         f"""#!{sys.executable}
 import os
 import sys
 
 args = sys.argv[1:]
-name = os.path.basename(sys.argv[0])
+name = {name!r} if sys.platform == "win32" else os.path.basename(sys.argv[0])
 if name == "py":
     if args == ["-3.12", "--version"]:
         raise SystemExit(2)
@@ -140,6 +312,19 @@ else:
 if args[:2] != ["-I", "-B"] or len(args) < 3:
     raise SystemExit(94)
 script, script_args = args[2], args[3:]
+if sys.platform == "win32":
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("entry_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    result = (
+        module.run(script_args, platform_name="win32")
+        if os.path.basename(script) == "launch_broker.py"
+        else module.run(script_args)
+    )
+    raise SystemExit(result)
 wrapper = (
     "import importlib.util,os,sys;"
     "script=sys.argv[1];"
@@ -152,14 +337,18 @@ wrapper = (
     "if os.path.basename(script)=='launch_broker.py' else module.run(args));"
     "raise SystemExit(result)"
 )
-os.execv(
-    sys.executable,
-    [sys.executable, "-I", "-B", "-c", wrapper, script, *script_args],
-)
+os.execv(sys.executable, [sys.executable, "-I", "-B", "-c", wrapper, script, *script_args])
 """,
         encoding="utf-8",
     )
-    shim.chmod(0o755)
+    program.chmod(0o755)
+    if sys.platform != "win32":
+        return program
+    shim = bin_dir / f"{name}.cmd"
+    shim.write_text(
+        f'@"{sys.executable}" -I -B "{program}" %*\n',
+        encoding="utf-8",
+    )
     return shim
 
 
@@ -259,6 +448,8 @@ def test_windows_public_command_reaches_full_preflight_with_only_one_entry(
     tmp_path: Path,
     entry_kind: str,
 ) -> None:
+    if sys.platform == "win32" and entry_kind == "uv":
+        pytest.skip("the cmd shim cannot preserve uv's >= version argument")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     entry = _write_windows_entry_shim(bin_dir, entry_kind)
@@ -301,8 +492,8 @@ def test_windows_public_command_reaches_full_preflight_with_only_one_entry(
         timeout=30.0,
     )
 
-    assert result.returncode == 2, result.stderr
     report = json.loads(result.stdout)
+    assert result.returncode == (0 if report["can_start_broker"] else 2), result.stderr
     assert report["contract_version"] == "windows-prerequisite-preflight-v1"
     assert {check["id"] for check in report["checks"]} == {
         "python_runtime",
@@ -357,7 +548,7 @@ def test_windows_launcher_reports_missing_runtime_without_starting_broker(
         return 0
 
     monkeypatch.setattr(launch_broker, "discover_python312", lambda **_kwargs: None)
-    monkeypatch.setattr(launch_broker.subprocess, "call", record_broker_call)
+    monkeypatch.setattr(launch_broker, "_run_broker_process", record_broker_call)
 
     result = launch_broker.run(["--workspace", str(tmp_path / "workspace")], platform_name="win32")
 
@@ -366,7 +557,7 @@ def test_windows_launcher_reports_missing_runtime_without_starting_broker(
     output = capsys.readouterr()
     assert output.out == ""
     report = json.loads(output.err)
-    assert parse_windows_bootstrap_report(report) == report
+    assert parse_launcher_preflight_report(report) == report
     assert report["status"] == "error"
     assert report["can_start_broker"] is False
     assert report["checks"][0]["code"] == "missing_dependency"
@@ -455,7 +646,7 @@ def test_windows_launcher_does_not_start_broker_after_refused_preflight(
 
     monkeypatch.setattr(launch_broker, "discover_python312", lambda **_kwargs: runtime)
     monkeypatch.setattr(launch_broker, "_run_windows_preflight", lambda *_args: report)
-    monkeypatch.setattr(launch_broker.subprocess, "call", record_broker_call)
+    monkeypatch.setattr(launch_broker, "_run_broker_process", record_broker_call)
 
     result = launch_broker.run(["--workspace", str(tmp_path / "workspace")], platform_name="win32")
 
@@ -477,6 +668,7 @@ def test_windows_launcher_starts_only_after_successful_preflight(
     runtime_tree = tmp_path / "runtime"
     (runtime_tree / "scripts").mkdir(parents=True)
     (runtime_tree / "src" / "goodjob").mkdir(parents=True)
+    (runtime_tree / "scripts" / "broker_bootstrap.py").write_text("# bootstrap\n", encoding="utf-8")
     (runtime_tree / "scripts" / "launch_broker.py").write_text("# launcher\n", encoding="utf-8")
     (runtime_tree / "scripts" / "session.py").write_text("# broker\n", encoding="utf-8")
     (runtime_tree / "scripts" / "windows_preflight.py").write_text(
@@ -500,7 +692,7 @@ def test_windows_launcher_starts_only_after_successful_preflight(
 
     monkeypatch.setattr(launch_broker, "discover_python312", lambda **_kwargs: runtime)
     monkeypatch.setattr(launch_broker, "_run_windows_preflight", lambda *_args: report)
-    monkeypatch.setattr(launch_broker.subprocess, "call", record_broker_call)
+    monkeypatch.setattr(launch_broker, "_run_broker_process", record_broker_call)
     arguments = ["--workspace", str(tmp_path / "workspace")]
     if preflight_only:
         arguments.append("--windows-preflight-only")
@@ -510,6 +702,7 @@ def test_windows_launcher_starts_only_after_successful_preflight(
     assert result == 0
     output = capsys.readouterr()
     if preflight_only:
+        assert output.out == json.dumps(report, sort_keys=True) + "\n"
         emitted = json.loads(output.out)
         assert emitted["can_start_broker"] is True
         assert broker_calls == []
@@ -523,25 +716,131 @@ def test_windows_launcher_starts_only_after_successful_preflight(
         assert "--capability" not in " ".join(broker_calls[0])
 
 
+def test_windows_launcher_decodes_preflight_utf8_independently_of_code_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_broker = _load_launcher()
+    runtime = PythonRuntime((r"C:\Python312\python.exe",), "direct_python", (3, 12, 8))
+    report = evaluate_windows_preflight(
+        workspace=tmp_path / "workspace",
+        runtime_dir=Path(__file__).resolve().parents[1],
+        python_version=(3, 12, 8),
+        launcher_kind="direct_python",
+        uv_available=False,
+        release_enabled=True,
+        probes=LauncherProbes(elevated=False),
+    ).as_dict()
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        returncode = 2
+        pid = 1
+
+        def __init__(self, command: Sequence[str], **kwargs: object) -> None:
+            self.command = command
+            captured.update(kwargs)
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            assert timeout > 0
+            return json.dumps(report), "\N{SNOWMAN}"
+
+        def poll(self) -> int:
+            return self.returncode
+
+    monkeypatch.setattr(launch_broker.subprocess, "Popen", FakePopen)
+
+    parsed = launch_broker._run_windows_preflight(runtime, str(tmp_path / "workspace"))
+
+    assert parsed == report
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def test_windows_preflight_timeout_reaps_the_probe_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_broker = _load_launcher()
+    actual_popen = subprocess.Popen
+    observed: list[subprocess.Popen[str]] = []
+
+    def record_popen(command: Sequence[str], **kwargs: Any) -> subprocess.Popen[str]:
+        process = cast("subprocess.Popen[str]", actual_popen(command, **kwargs))
+        observed.append(process)
+        return process
+
+    monkeypatch.setattr(launch_broker.subprocess, "Popen", record_popen)
+    monkeypatch.setattr(launch_broker, "WINDOWS_PREFLIGHT_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        launch_broker._run_preflight_process(
+            [sys.executable, "-I", "-B", "-c", "import time; time.sleep(60)"]
+        )
+
+    assert len(observed) == 1
+    assert observed[0].poll() is not None
+
+
+def test_windows_preflight_keyboard_interrupt_reaps_the_probe_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_broker = _load_launcher()
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name == "posix",
+    )
+
+    class InterruptingPopen:
+        pid = process.pid
+        returncode: int | None = None
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            del timeout
+            raise KeyboardInterrupt
+
+        def poll(self) -> int | None:
+            return process.poll()
+
+        def kill(self) -> None:
+            process.kill()
+
+        def wait(self) -> int:
+            return process.wait()
+
+    monkeypatch.setattr(
+        launch_broker.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: InterruptingPopen(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        launch_broker._run_preflight_process(["unused"])
+
+    assert process.poll() is not None
+
+
 def test_windows_launcher_rejects_preflight_exit_report_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     launch_broker = _load_launcher()
     runtime = PythonRuntime((r"C:\Python312\python.exe",), "direct_python", (3, 12, 8))
-    successful_report = {
-        "contract_version": "windows-prerequisite-preflight-v1",
-        "status": "ok",
-        "can_start_broker": True,
-        "checks": [],
-        "notices": [],
-    }
+    successful_report = evaluate_windows_preflight(
+        workspace=tmp_path / "workspace",
+        runtime_dir=Path(__file__).resolve().parents[1],
+        python_version=runtime.version,
+        launcher_kind=runtime.kind,
+        uv_available=False,
+        release_enabled=True,
+        probes=LauncherProbes(elevated=True),
+    ).as_dict()
     monkeypatch.setattr(
-        launch_broker.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 2, json.dumps(successful_report), ""
-        ),
+        launch_broker,
+        "_run_preflight_process",
+        lambda _command: subprocess.CompletedProcess([], 2, json.dumps(successful_report), ""),
     )
 
     report = launch_broker._run_windows_preflight(runtime, str(tmp_path / "workspace"))
@@ -565,11 +864,9 @@ def test_windows_launcher_rejects_success_report_missing_required_checks(
         "notices": [],
     }
     monkeypatch.setattr(
-        launch_broker.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 0, json.dumps(incomplete_report), ""
-        ),
+        launch_broker,
+        "_run_preflight_process",
+        lambda _command: subprocess.CompletedProcess([], 0, json.dumps(incomplete_report), ""),
     )
 
     report = launch_broker._run_windows_preflight(runtime, str(tmp_path / "workspace"))
@@ -606,9 +903,9 @@ def test_windows_launcher_rejects_semantically_inconsistent_success_report(
             "requires_explicit_consent": True,
         }
     monkeypatch.setattr(
-        launch_broker.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(report), ""),
+        launch_broker,
+        "_run_preflight_process",
+        lambda _command: subprocess.CompletedProcess([], 0, json.dumps(report), ""),
     )
 
     parsed = launch_broker._run_windows_preflight(runtime, str(tmp_path / "workspace"))
