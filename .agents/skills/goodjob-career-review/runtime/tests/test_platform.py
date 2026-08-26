@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from goodjob.git_metadata import classify_git_command_failure
 from goodjob.platform import detect_platform, select_git_sandbox
 from goodjob.platform.detect import (
     GitSandboxUnavailableError,
@@ -134,6 +135,38 @@ def test_sandbox_failure_reason_only_classifies_launcher_failures(
         assert reason is None
     else:
         assert reason is not None and expected in reason
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "expected_kind"),
+    [
+        (128, "xcrun: error: invalid active developer path", "git_executable_unusable"),
+        (
+            128,
+            "fatal: unable to read /outside/gitconfig: Operation not permitted",
+            "git_executable_unusable",
+        ),
+        (
+            128,
+            "fatal: could not open '.git/config': Operation not permitted",
+            "git_repository_boundary_violation",
+        ),
+        (128, "fatal: not a git repository", "broken_repository"),
+        (127, "", "git_executable_unusable"),
+    ],
+)
+def test_git_failure_diagnosis_separates_toolchain_boundary_and_repository(
+    returncode: int, stderr: str, expected_kind: str
+) -> None:
+    diagnosis = classify_git_command_failure(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+    )
+
+    assert diagnosis.kind == expected_kind
+    assert diagnosis.message
+    assert diagnosis.remediation
 
 
 def test_git_state_reports_sandbox_unavailable_with_enablement_guidance(

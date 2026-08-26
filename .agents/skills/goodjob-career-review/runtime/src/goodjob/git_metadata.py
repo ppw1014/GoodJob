@@ -54,6 +54,62 @@ MAX_GIT_COMMAND_BYTES = 8 * 1024 * 1024
 
 MAX_HISTORY_FIELD_BYTES = 512
 
+
+@dataclass(frozen=True)
+class GitFailureDiagnosis:
+    """Stable classification for a completed Git command that did not succeed."""
+
+    kind: Literal[
+        "git_executable_unusable",
+        "git_repository_boundary_violation",
+        "broken_repository",
+    ]
+    message: str
+    remediation: str
+
+
+def classify_git_command_failure(
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> GitFailureDiagnosis:
+    """Classify known Git entry-point and boundary failures without exposing stderr.
+
+    Git's diagnostic text is untrusted and may be localized.  Only stable markers
+    that identify the launcher/toolchain itself are used for the executable class;
+    permission failures remain repository-boundary failures.  Everything else is
+    an ordinary repository failure.
+    """
+    del stdout
+    normalized = stderr.casefold()
+    executable_markers = (
+        "xcrun: error:",
+        "xcode-select:",
+        "cannot execute",
+        "failed to execute",
+        "gitconfig",
+        "git executable",
+    )
+    if returncode in {126, 127} or any(marker in normalized for marker in executable_markers):
+        return GitFailureDiagnosis(
+            "git_executable_unusable",
+            "The selected Git executable or its required system configuration is unusable.",
+            "Select an installed trusted Git executable with readable system configuration, "
+            "then run refresh.",
+        )
+    if any(marker in stderr for marker in ("Operation not permitted", "Permission denied")):
+        return GitFailureDiagnosis(
+            "git_repository_boundary_violation",
+            "Repository metadata requested a path outside the authorized Git sandbox.",
+            "Remove root-external Git config or object indirection, then run refresh.",
+        )
+    return GitFailureDiagnosis(
+        "broken_repository",
+        "Local Git metadata could not be read through its bound repository identity.",
+        "Repair the repository metadata and run refresh.",
+    )
+
 # Resolution is delayed until a scanner is constructed so missing system tools
 # can cross the CLI boundary as a stable GoodJobError.
 GIT_EXECUTABLE = "/usr/bin/git"
@@ -896,24 +952,16 @@ class GitMetadataReader:
                 )
             result = self._git(binding, "rev-parse", "--is-inside-work-tree")
             if result.returncode != 0 or result.stdout.strip() != "true":
-                boundary_denied = any(
-                    marker in result.stderr
-                    for marker in ("Operation not permitted", "Permission denied")
+                diagnosis = classify_git_command_failure(
+                    returncode=result.returncode,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
                 )
                 return None, self._issue(
-                    "git_repository_boundary_violation" if boundary_denied else "broken_repository",
+                    diagnosis.kind,
                     "warning",
-                    (
-                        "Repository metadata requested a path outside the authorized Git sandbox."
-                        if boundary_denied
-                        else "Local Git metadata could not be read through its bound repository "
-                        "identity."
-                    ),
-                    (
-                        "Remove root-external Git config or object indirection, then run refresh."
-                        if boundary_denied
-                        else "Repair the repository metadata and run refresh."
-                    ),
+                    diagnosis.message,
+                    diagnosis.remediation,
                     _relative_path(root, workspace_root),
                 )
             branch_result = self._git(binding, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -961,6 +1009,19 @@ class GitMetadataReader:
                 _relative_path(root, workspace_root),
             )
         if status_result.returncode != 0:
+            diagnosis = classify_git_command_failure(
+                returncode=status_result.returncode,
+                stdout=status_result.stdout,
+                stderr=status_result.stderr,
+            )
+            if diagnosis.kind != "broken_repository":
+                return None, self._issue(
+                    diagnosis.kind,
+                    "warning",
+                    diagnosis.message,
+                    diagnosis.remediation,
+                    _relative_path(root, workspace_root),
+                )
             return None, self._issue(
                 "git_status_unavailable",
                 "warning",
