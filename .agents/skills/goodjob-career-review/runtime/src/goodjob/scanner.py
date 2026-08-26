@@ -13,6 +13,7 @@ import subprocess
 import sys
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,6 +47,7 @@ from goodjob.git_metadata import (
     _safe_lstat,
 )
 from goodjob.platform.detect import resolve_git_executable
+from goodjob.platform.filesystem_probe import FilesystemProbeResult, probe_workspace_filesystem
 from goodjob.platform.fs_windows import WindowsDirectory
 from goodjob.process_identity import owner_process_stopped, process_identity
 from goodjob.source_io import close_file_descriptor
@@ -727,7 +729,13 @@ class IgnoreMatcher:
 class WorkspaceScanner:
     """Build immutable scan snapshots after the caller has verified authorization."""
 
-    def __init__(self, database: Database, *, git_executable: str | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        git_executable: str | None = None,
+        filesystem_probe: Callable[[Path], FilesystemProbeResult] = probe_workspace_filesystem,
+    ) -> None:
         self._database = database
         resolved_git_executable = (
             resolve_git_executable() if git_executable is None else git_executable
@@ -740,6 +748,7 @@ class WorkspaceScanner:
             git_command_timeout_seconds=lambda: GIT_COMMAND_TIMEOUT_SECONDS,
             workspace_git_command=lambda binding, arguments: self._git_command(binding, arguments),
         )
+        self._filesystem_probe = filesystem_probe
         self._analysis_cache: dict[tuple[str, str, str, str, str, str], AnalysisResult] = {}
 
     def scan(
@@ -1021,6 +1030,26 @@ class WorkspaceScanner:
         scan_started_at: str,
         exclusion_config: ProjectExclusionConfig,
     ) -> ScanResult:
+        filesystem_issue = self._workspace_filesystem_issue(root)
+        if filesystem_issue is not None:
+            self._persist_issues(scan_run_id, None, (filesystem_issue,))
+            coverage = self._coverage(
+                scan_run_id,
+                Counter(),
+                Counter(),
+                [],
+                {},
+            )
+            self._finish_run(scan_run_id, "failed", coverage)
+            return ScanResult(
+                scan_run_id=scan_run_id,
+                workspace_id=workspace_id,
+                status="failed",
+                mode=mode,
+                change_detection_mode=change_detection_mode,
+                coverage=coverage,
+                issues=(filesystem_issue,),
+            )
         plans, discovery_issues = self._discover(root, external_git_grants, scan_started_at)
         exclusion_matches, unmatched_issues = self._match_project_exclusions(
             root, plans, exclusion_config.rules
@@ -1116,6 +1145,28 @@ class WorkspaceScanner:
             change_detection_mode=change_detection_mode,
             coverage=coverage,
             issues=tuple(all_issues),
+        )
+
+    def _workspace_filesystem_issue(self, root: Path) -> ScanIssueDraft | None:
+        try:
+            result = self._filesystem_probe(root)
+        except (OSError, ValueError):
+            result = FilesystemProbeResult(
+                status="error",
+                filesystem_type="unknown",
+                flags=None,
+                message="The workspace filesystem capability could not be probed safely.",
+                remediation="Choose a readable local workspace whose filesystem type can be "
+                "verified, then run preflight again.",
+            )
+        if result.status == "supported":
+            return None
+        return _issue(
+            "workspace_filesystem_unsupported",
+            "error",
+            result.message,
+            result.remediation,
+            ".",
         )
 
     @staticmethod

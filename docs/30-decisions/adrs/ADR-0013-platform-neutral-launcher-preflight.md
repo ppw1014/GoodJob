@@ -8,11 +8,11 @@
 ## 决策
 
 1. `runtime/scripts/launch_broker.py --preflight-only` 是所有平台唯一的新公开预检入口。它与 `--windows-preflight-only` 互斥；后者只作为兼容入口保留，不写入 Skill 流程。
-2. 新入口只输出封闭的 `launcher-preflight-v1` JSON：顶层字段固定为 `contract_version/status/can_start_broker/platform/launcher_kind/checks/notices`。平台、launcher、check、失败码、remediation 及 notice 的合法组合与顺序由运行时注册表定义；producer 与严格 parser 读取同一注册表。
+2. 新入口只输出封闭的 `launcher-preflight-v1` JSON：顶层字段固定为 `contract_version/status/can_start_broker/platform/launcher_kind/checks/notices`。平台、launcher、check、失败码、remediation 及 notice 的合法组合与顺序由运行时注册表定义；producer 与严格 parser 读取同一注册表。POSIX 调用若提供 `--workspace`，还必须按顺序消费 `workspace_filesystem` check；省略该参数只保留给直接函数的兼容形状，正式 Skill 启动始终传入工作区。
 3. `passed` check 只能有 `id/status/message`；`failed` check 还必须有 `code/remediation`。Remediation 固定包含 `action/purpose/requires_explicit_consent`，仅注册表声明时允许 `source_url`。未知字段、未知组合、重复 check/notice、缺 check、顺序变化及跨字段矛盾全部拒绝。
 4. 预检 ready 时 stdout 恰有一份 v1、stderr 为空、退出 `0`；not-ready 或可结构化的协议失败时仍由 stdout 输出 accepted v1、stderr 为空、退出 `2`。参数语法错误仍由 argparse 返回 `2`，不伪装成 v1。
 5. 普通启动成功不输出 launcher 报告并透传 broker 业务退出码。broker 建立前的合法失败只在 stderr 输出一份 accepted v1 并返回 `2`；stdout 保持为空。
-6. 预检不得启动 broker、读取工作区源码、创建数据目录或执行业务写入，不得联网、安装、提权或修改系统策略。被中断或超时的 Windows prerequisite 子进程必须先终止并 wait，不能遗留常驻进程。
+6. 预检不得启动 broker、读取工作区源码、创建数据目录或执行业务写入，不得联网、安装、提权或修改系统策略。POSIX `workspace_filesystem` check 只读取本地 `statfs`/等价路径能力信息；已知网络/FUSE、未知类型和探测失败均返回结构化 `unsupported_capability`，不自动转用远程执行或复制。被中断或超时的 Windows prerequisite 子进程必须先终止并 wait，不能遗留常驻进程。
 7. Windows 新报告必须包装同一次旧 prerequisite 结果，逐项保留 checks、notices、message 与 remediation，不另做第二次事实判断。普通 Windows 启动仍在 launcher 运行旧 prerequisite，并由 session 做第二次安全检查。
 8. `windows-bootstrap-report-v1` 与 `windows-prerequisite-preflight-v1` 的版本、内容、顺序、输出通道和 `0/2` 语义保持不变。旧 parser 只新增封闭字段校验；历史上接受未知字段不属于兼容承诺。
 9. Windows 普通启动自本 ADR 接受起立即改用 `launcher-preflight-v1`；`--windows-preflight-only` 的兼容窗口覆盖 `launcher-preflight-v1` 的完整生命周期。旧入口最早只能随后继协议版本退出，且退出前必须由独立 accepted ADR 记录迁移方案、证明仓库与受支持 host 已无旧入口消费者，并移除对应兼容回归门禁；任一条件不满足时不得删除旧入口。

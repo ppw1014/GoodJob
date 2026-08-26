@@ -67,7 +67,13 @@ Git 元数据损坏时，该候选项目产生 `broken_repository` 类 `ScanIssu
 
 模块边界优先由 Git 项目的 workspace manifest、语言 workspace 配置、服务/应用 manifest、数据库迁移根和明确的 build/test 配置给出。无法由这些证据确认的目录只作为文件集合，不创建虚假的 `Module`。模块记录本次 `ProjectSnapshot` 的边界，随快照版本化（`FR-03`、`NFR-07`）。
 
-### 3.4 原生 Windows 文件系统与 Git 边界
+### 3.4 POSIX 工作区文件系统能力预检
+
+macOS/Linux launcher 在收到 `--workspace` 时，在启动 broker 或 Git 前对工作区路径做只读文件系统能力探测。macOS 优先读取系统 `statfs` 的 filesystem type 与 local flag：APFS/HFS 等已知本地类型可继续，sshfs、macFUSE/FUSE、NFS、SMB、WebDAV 及其他明确非本地类型返回 `workspace_filesystem` failed check 和 `unsupported_capability` remediation；未知类型或探测失败也 fail-closed，并保留稳定的 type/flags 诊断字段，不解析本地化 stderr。Linux 的 bwrap 仍是访问隔离权威，普通本地路径维持既有行为。
+
+同一能力探测也在 scanner 直接入口执行，失败会在已建立的终态 `ScanRun` 中写入一个 `workspace_filesystem_unsupported` error，随后返回结构化 `failed` 结果；因此绕过 launcher 不会把挂载问题泛化成 Git boundary issue。探测只调用本地系统 API，不通过 SSH 远程执行、不自动复制工作区、不自动换根。完整 issue 仍写入 SQLite，overview 的摘要展示规则见 §5。
+
+### 3.5 原生 Windows 文件系统与 Git 边界
 
 原生 Windows 入口只允许把一个绝对路径解析为授权 root handle 一次；入口立即记录 `GetFinalPathNameByHandleW` 的显示路径及 `FileIdInfo` 的 volume serial/file ID。后续 discovery、index、source read、rename、publish、remove、scanner readlink 与目录枚举只经 `ARCH-I12` 传递 borrowed root/parent handle 和单个名称组件，不能把缓存 pathname 当作授权。
 

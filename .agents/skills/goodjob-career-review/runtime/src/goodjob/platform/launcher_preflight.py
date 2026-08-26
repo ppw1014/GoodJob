@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 
+from goodjob.platform.filesystem_probe import FilesystemProbeResult, probe_workspace_filesystem
+
 if TYPE_CHECKING:
     from goodjob.platform.preflight_windows import WindowsReportDict
     from goodjob.platform.runtime_bootstrap import PythonRuntime
@@ -243,6 +245,7 @@ _BROKER_START = RemediationContract(
     requires_explicit_consent=False,
 )
 _POSIX_CHECKS = frozenset({"python_runtime", "git_sandbox"})
+_POSIX_WORKSPACE_CHECKS = _POSIX_CHECKS | {"workspace_filesystem"}
 _POSIX_LAUNCHERS: frozenset[LauncherKind] = frozenset({"uv", "direct_python", "unavailable"})
 _WINDOWS_LAUNCHERS: frozenset[LauncherKind] = frozenset(
     {"uv", "direct_python", "windows_py_launcher", "unavailable"}
@@ -266,6 +269,9 @@ _POSIX_READY_STATUSES: tuple[tuple[str, CheckStatus], ...] = (
     ("python_runtime", _PASSED),
     ("git_sandbox", _PASSED),
 )
+_POSIX_WORKSPACE_READY_STATUSES: tuple[tuple[str, CheckStatus], ...] = (
+    (*_POSIX_READY_STATUSES, ("workspace_filesystem", _PASSED))
+)
 _WINDOWS_READY_STATUSES: tuple[tuple[str, CheckStatus], ...] = tuple(
     (check_id, _PASSED) for check_id in WINDOWS_PREFLIGHT_REQUIRED_CHECK_IDS
 )
@@ -283,6 +289,31 @@ _POSIX_REPORT_SHAPES = (
         check_launcher_rules=(_POSIX_RUNTIME_RULE,),
         required_statuses=(*_POSIX_READY_STATUSES, ("broker_start", _FAILED)),
     ),
+    ReportShape(
+        _POSIX_WORKSPACE_CHECKS,
+        _POSIX_LAUNCHERS,
+        ready_allowed=True,
+        check_launcher_rules=(_POSIX_RUNTIME_RULE,),
+    ),
+    ReportShape(
+        _POSIX_WORKSPACE_CHECKS | {"broker_start"},
+        _AVAILABLE_POSIX_LAUNCHERS,
+        check_launcher_rules=(_POSIX_RUNTIME_RULE,),
+        required_statuses=(*_POSIX_WORKSPACE_READY_STATUSES, ("broker_start", _FAILED)),
+    ),
+)
+
+_MACOS_WORKSPACE_FILESYSTEM = RemediationContract(
+    code="unsupported_capability",
+    action="use_local_workspace",
+    purpose="run protected scanning from a locally verifiable macOS filesystem",
+    requires_explicit_consent=False,
+)
+_LINUX_WORKSPACE_FILESYSTEM = RemediationContract(
+    code="unsupported_capability",
+    action="use_local_workspace_or_wsl2",
+    purpose="run protected scanning from a locally verifiable Linux filesystem",
+    requires_explicit_consent=False,
 )
 
 LAUNCHER_PREFLIGHT_REGISTRY: dict[PlatformName, PlatformContract] = {
@@ -300,6 +331,7 @@ LAUNCHER_PREFLIGHT_REGISTRY: dict[PlatformName, PlatformContract] = {
                     ),
                 ),
             ),
+            CheckContract("workspace_filesystem", (_MACOS_WORKSPACE_FILESYSTEM,)),
             CheckContract("launcher_protocol", (_LAUNCHER_PROTOCOL,)),
             CheckContract("broker_start", (_BROKER_START,)),
         ),
@@ -326,6 +358,7 @@ LAUNCHER_PREFLIGHT_REGISTRY: dict[PlatformName, PlatformContract] = {
                     ),
                 ),
             ),
+            CheckContract("workspace_filesystem", (_LINUX_WORKSPACE_FILESYSTEM,)),
             CheckContract("launcher_protocol", (_LAUNCHER_PROTOCOL,)),
             CheckContract("broker_start", (_BROKER_START,)),
         ),
@@ -590,6 +623,8 @@ def evaluate_launcher_preflight(
     runtime: PythonRuntime | None,
     path_is_file: Callable[[Path], bool] = Path.is_file,
     sandbox_is_usable: Callable[[PlatformName], bool] = _sandbox_is_usable,
+    workspace: str | Path | None = None,
+    filesystem_probe: Callable[[Path], FilesystemProbeResult] = probe_workspace_filesystem,
 ) -> LauncherPreflightReportDict:
     """Evaluate side-effect-free prerequisites without a legacy Windows report."""
     platform = platform_name_for_system(platform_name)
@@ -660,6 +695,39 @@ def evaluate_launcher_preflight(
                 remediation_for(platform, "git_sandbox", action),
             )
         )
+    if workspace is not None:
+        workspace_path = Path(workspace).expanduser()
+        try:
+            filesystem = filesystem_probe(workspace_path)
+        except (OSError, ValueError):
+            filesystem = FilesystemProbeResult(
+                status="error",
+                filesystem_type="unknown",
+                flags=None,
+                message="The workspace filesystem capability could not be probed safely.",
+                remediation="Choose a readable local workspace whose filesystem type can be "
+                "verified, then run preflight again.",
+            )
+        if filesystem.status == "supported":
+            checks.append(
+                passed_check(
+                    "workspace_filesystem",
+                    filesystem.message,
+                )
+            )
+        else:
+            action = (
+                "use_local_workspace"
+                if platform == "macos"
+                else "use_local_workspace_or_wsl2"
+            )
+            checks.append(
+                failed_check(
+                    "workspace_filesystem",
+                    filesystem.message,
+                    remediation_for(platform, "workspace_filesystem", action),
+                )
+            )
     return LauncherPreflightReport(
         platform=platform,
         launcher_kind=launcher_kind,

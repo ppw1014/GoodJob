@@ -13,6 +13,11 @@ from typing import Any, cast
 
 import pytest
 
+from goodjob.platform.filesystem_probe import (
+    FilesystemInfo,
+    FilesystemProbeResult,
+    probe_workspace_filesystem,
+)
 from goodjob.platform.launcher_preflight import (
     LAUNCHER_PREFLIGHT_REGISTRY,
     LauncherPreflightFact,
@@ -120,6 +125,69 @@ def test_installed_but_unusable_linux_sandbox_fails_closed() -> None:
 
     assert parse_launcher_preflight_report(report) == report
     assert report["checks"][1]["remediation"]["action"] == "repair_linux_runtime_or_use_wsl2"
+
+
+@pytest.mark.parametrize(
+    ("filesystem_type", "is_local", "expected_status"),
+    [
+        ("apfs", True, "supported"),
+        ("sshfs", False, "unsupported"),
+        ("unknown", True, "unknown"),
+    ],
+)
+def test_filesystem_probe_classifies_statfs_results_without_reading_source(
+    filesystem_type: str, is_local: bool, expected_status: str
+) -> None:
+    result = probe_workspace_filesystem(
+        Path("/owner-authorized/workspace"),
+        statfs_probe=lambda _path: FilesystemInfo(filesystem_type, 17, is_local),
+    )
+
+    assert result.status == expected_status
+    assert result.filesystem_type == filesystem_type
+    assert result.flags == 17
+    assert result.message
+    assert isinstance(result.remediation, str)
+
+
+def test_filesystem_probe_retains_a_stable_failure_for_probe_errors() -> None:
+    result = probe_workspace_filesystem(
+        Path("/owner-authorized/workspace"),
+        statfs_probe=lambda _path: (_ for _ in ()).throw(OSError("private probe detail")),
+    )
+
+    assert result.status == "error"
+    assert result.filesystem_type == "unknown"
+    assert "private probe detail" not in result.message
+    assert result.remediation
+
+
+@pytest.mark.parametrize("status", ["supported", "unsupported", "unknown", "error"])
+def test_posix_preflight_consumes_workspace_filesystem_result(status: str) -> None:
+    runtime = PythonRuntime(("python3.12",), "direct_python", (3, 12, 9))
+    filesystem = FilesystemProbeResult(
+        status=cast(Any, status),
+        filesystem_type="fixture",
+        flags=1,
+        message=f"fixture filesystem is {status}",
+        remediation="fixture remediation",
+    )
+    report = evaluate_launcher_preflight(
+        platform_name="darwin",
+        runtime=runtime,
+        path_is_file=lambda _path: True,
+        sandbox_is_usable=lambda _platform: True,
+        workspace=Path("/owner-authorized/workspace"),
+        filesystem_probe=lambda _path: filesystem,
+    )
+
+    assert parse_launcher_preflight_report(report) == report
+    assert [check["id"] for check in report["checks"]] == [
+        "python_runtime",
+        "git_sandbox",
+        "workspace_filesystem",
+    ]
+    assert report["can_start_broker"] is (status == "supported")
 
 
 def test_windows_adapter_losslessly_maps_the_same_old_report() -> None:

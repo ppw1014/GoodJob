@@ -254,6 +254,7 @@ def _launcher_report(
         report = evaluate_launcher_preflight(
             platform_name=platform_name,
             runtime=runtime,
+            workspace=workspace,
         )
     parsed = parse_launcher_preflight_report(report)
     if parsed is not None and parsed["platform"] == platform_name_for_system(platform_name):
@@ -280,7 +281,7 @@ def run(argv: list[str] | None = None, *, platform_name: str = sys.platform) -> 
     parser.add_argument(
         "--workspace",
         default=None,
-        help="workspace used by the native Windows prerequisite preflight",
+        help="workspace used by the platform filesystem capability preflight",
     )
     preflight_group = parser.add_mutually_exclusive_group()
     preflight_group.add_argument(

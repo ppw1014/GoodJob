@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
@@ -22,6 +22,7 @@ from goodjob.config import MAX_CONFIG_FILE_BYTES
 from goodjob.db import Database
 from goodjob.errors import InvalidInputError
 from goodjob.paths import DataPaths
+from goodjob.platform.filesystem_probe import FilesystemProbeResult
 from goodjob.scanner import (
     IGNORE_PATTERN_SYNTAX,
     IgnoreMatcher,
@@ -172,7 +173,11 @@ def _rewrite_git_pointer(pointer: Path, content: str) -> None:
 
 
 def _direct_scanner(
-    data_dir: Path, workspace: Path, *, git_executable: str | None = None
+    data_dir: Path,
+    workspace: Path,
+    *,
+    git_executable: str | None = None,
+    filesystem_probe: Callable[[Path], FilesystemProbeResult] | None = None,
 ) -> tuple[WorkspaceScanner, str]:
     database = Database(DataPaths(data_dir))
     capability = generate_capability()
@@ -185,10 +190,15 @@ def _direct_scanner(
         capability=capability,
         request=request,
     )
-    return (
-        WorkspaceScanner(database, git_executable=git_executable),
-        receipt.authorization_receipt_id,
-    )
+    if filesystem_probe is None:
+        scanner = WorkspaceScanner(database, git_executable=git_executable)
+    else:
+        scanner = WorkspaceScanner(
+            database,
+            git_executable=git_executable,
+            filesystem_probe=filesystem_probe,
+        )
+    return scanner, receipt.authorization_receipt_id
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows active-root regression")
@@ -1665,6 +1675,45 @@ def test_repo_manifest_metadata_inside_authorized_root_remains_scannable(
     assert result.status == "completed"
     assert result.coverage["fresh_projects"] == 1
     assert not any(issue.kind == "unsupported_repository_layout" for issue in result.issues)
+
+
+def test_direct_scanner_fails_before_discovery_for_unsupported_filesystem(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    filesystem = FilesystemProbeResult(
+        status="unsupported",
+        filesystem_type="sshfs",
+        flags=0,
+        message="fixture workspace filesystem is unsupported",
+        remediation="select a local workspace",
+    )
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data",
+        workspace,
+        git_executable=sys.executable,
+        filesystem_probe=lambda _path: filesystem,
+    )
+
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="filesystem-preflight-v1",
+        authorization_receipt_id=receipt_id,
+    )
+
+    assert result.status == "failed"
+    assert result.coverage["fresh_projects"] == 0
+    assert [issue.kind for issue in result.issues] == ["workspace_filesystem_unsupported"]
+    assert result.issues[0].message == filesystem.message
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    assert (
+        connection.execute("SELECT COUNT(*) FROM scan_runs WHERE status = 'failed'")
+        .fetchone()[0]
+        == 1
+    )
+    assert connection.execute("SELECT COUNT(*) FROM scan_issues").fetchone()[0] == 1
+    connection.close()
 
 
 def test_internal_git_config_can_include_a_file_inside_the_authorized_workspace(
