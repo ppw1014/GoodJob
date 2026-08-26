@@ -87,8 +87,9 @@ MAX_ROLE_LENS_CONTEXT_MODULES = 500
 MAX_ROLE_LENS_CONTEXT_MODULES_PER_PROJECT = 20
 MAX_ROLE_LENS_CONTEXT_EVIDENCE_SAMPLES = 500
 MAX_ROLE_LENS_CONTEXT_EVIDENCE_PER_PROJECT = 10
-SCAN_OVERVIEW_CONTRACT_VERSION = "scan-overview-v1"
+SCAN_OVERVIEW_CONTRACT_VERSION = "scan-overview-v2"
 MAX_SCAN_OVERVIEW_ISSUES = 200
+MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP = 3
 IGNORE_PATTERN_SYNTAX: tuple[tuple[str, str], ...] = (
     ("literal_name", "supported"),
     ("star_and_question_wildcards", "supported_with_python_fnmatch_approximation"),
@@ -846,22 +847,21 @@ class WorkspaceScanner:
                         "scan_run": None,
                         "coverage": None,
                         "issues": [],
+                        "issue_groups": [],
                         "limits": {
                             "issue_limit": MAX_SCAN_OVERVIEW_ISSUES,
                             "available_issues": 0,
                             "issues_truncated": False,
+                            "group_count": 0,
+                            "error_count": 0,
+                            "warning_count": 0,
+                            "info_count": 0,
                         },
                     },
                 }
             selected_scan_run_id = str(row["scan_run_id"])
             coverage = self._overview_coverage(connection, row, selected_scan_run_id)
-            issue_count = int(
-                connection.execute(
-                    "SELECT COUNT(*) AS count FROM scan_issues WHERE scan_run_id = ?",
-                    (selected_scan_run_id,),
-                ).fetchone()["count"]
-            )
-            issue_rows = connection.execute(
+            all_issues = connection.execute(
                 """
                 SELECT issue_id, project_id, artifact_id, kind, severity,
                        relative_path, message, remediation
@@ -871,11 +871,61 @@ class WorkspaceScanner:
                     WHEN 'error' THEN 0
                     WHEN 'warning' THEN 1
                     ELSE 2
-                END, issue_id
-                LIMIT ?
+                END, kind, remediation, CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END, relative_path, issue_id
                 """,
-                (selected_scan_run_id, MAX_SCAN_OVERVIEW_ISSUES),
+                (selected_scan_run_id,),
             ).fetchall()
+            issue_count = len(all_issues)
+            error_count = sum(1 for item in all_issues if item["severity"] == "error")
+            warning_count = sum(1 for item in all_issues if item["severity"] == "warning")
+            info_count = issue_count - error_count - warning_count
+
+            grouped_map: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+            for issue in all_issues:
+                key = (str(issue["severity"]), str(issue["kind"]), str(issue["remediation"]))
+                grouped_map.setdefault(key, []).append(issue)
+
+            severity_order = {"error": 0, "warning": 1, "info": 2}
+            sorted_group_keys = sorted(
+                grouped_map.keys(),
+                key=lambda k: (severity_order.get(k[0], 3), k[1], k[2]),
+            )
+
+            issue_groups: list[dict[str, object]] = []
+            for key in sorted_group_keys:
+                items = grouped_map[key]
+                samples = [
+                    {
+                        "issue_id": str(sample["issue_id"]),
+                        "project_id": sample["project_id"],
+                        "artifact_id": sample["artifact_id"],
+                        "relative_path": sample["relative_path"],
+                        "message": str(sample["message"]),
+                    }
+                    for sample in items[:MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP]
+                ]
+                issue_groups.append(
+                    {
+                        "severity": key[0],
+                        "kind": key[1],
+                        "remediation": key[2],
+                        "count": len(items),
+                        "samples": samples,
+                        "omitted_count": max(0, len(items) - len(samples)),
+                    }
+                )
+
+            critical_issues = [
+                item for item in all_issues if item["severity"] in ("error", "warning")
+            ]
+            other_issues = [
+                item for item in all_issues if item["severity"] not in ("error", "warning")
+            ]
+            critical_issues.sort(
+                key=lambda r: (0 if r["severity"] == "error" else 1, str(r["issue_id"]))
+            )
+            other_issues.sort(key=lambda r: str(r["issue_id"]))
+            issue_rows = (critical_issues + other_issues)[:MAX_SCAN_OVERVIEW_ISSUES]
         return {
             "status": "ok",
             "scan_overview": {
@@ -906,10 +956,15 @@ class WorkspaceScanner:
                     }
                     for issue in issue_rows
                 ],
+                "issue_groups": issue_groups,
                 "limits": {
                     "issue_limit": MAX_SCAN_OVERVIEW_ISSUES,
                     "available_issues": issue_count,
                     "issues_truncated": issue_count > len(issue_rows),
+                    "group_count": len(issue_groups),
+                    "error_count": error_count,
+                    "warning_count": warning_count,
+                    "info_count": info_count,
                 },
             },
         }

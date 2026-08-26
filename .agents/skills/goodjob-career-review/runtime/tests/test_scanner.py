@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
+import uuid
 
 import pytest
 
@@ -2826,3 +2827,140 @@ def test_ignore_approximations_are_visible_in_coverage_without_failing_scan(
     }
     unsupported = [issue for issue in result.issues if issue.kind == "ignore_pattern_unsupported"]
     assert len(unsupported) == 3
+
+
+def test_scan_overview_groups_repetitive_issues_and_retains_audit_records(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "package.json").write_text("{}", encoding="utf-8")
+
+    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace, git_executable=sys.executable)
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="test-v1",
+        authorization_receipt_id=receipt_id,
+    )
+    assert result.status == "completed"
+
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    scan_run_id = result.scan_run_id
+
+    # Insert 1 error, 2 warnings, and 1096 symlink_skipped info issues
+    connection.execute(
+        """
+        INSERT INTO scan_issues (
+            issue_id, scan_run_id, project_id, artifact_id, kind,
+            severity, relative_path, message, remediation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            scan_run_id,
+            None,
+            None,
+            "permission_denied",
+            "error",
+            "critical/secret.key",
+            "Cannot access file due to permissions.",
+            "Fix filesystem permissions.",
+        ),
+    )
+    for index in range(2):
+        connection.execute(
+            """
+            INSERT INTO scan_issues (
+                issue_id, scan_run_id, project_id, artifact_id, kind,
+                severity, relative_path, message, remediation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                scan_run_id,
+                None,
+                None,
+                "broken_repository",
+                "warning",
+                f"repo_{index}/.git",
+                f"Git repository {index} metadata is corrupt.",
+                "Reclone or check Git repository state.",
+            ),
+        )
+    for index in range(1096):
+        connection.execute(
+            """
+            INSERT INTO scan_issues (
+                issue_id, scan_run_id, project_id, artifact_id, kind,
+                severity, relative_path, message, remediation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                scan_run_id,
+                None,
+                None,
+                "symlink_skipped",
+                "info",
+                f".repo/projects/manifest_{index}.git",
+                "Skipped symbolic link during scan discovery.",
+                "Review symlink targets or authorize manifest root.",
+            ),
+        )
+    connection.commit()
+    connection.close()
+
+    overview = scanner.overview(workspace_path=str(workspace), scan_run_id=scan_run_id)
+    scan_overview = _object_field(overview, "scan_overview")
+
+    assert scan_overview["contract_version"] == "scan-overview-v2"
+    assert scan_overview["found"] is True
+
+    limits = _object_field(scan_overview, "limits")
+    assert limits["available_issues"] == 1099
+    assert limits["error_count"] == 1
+    assert limits["warning_count"] == 2
+    assert limits["info_count"] == 1096
+    assert limits["issues_truncated"] is True
+    assert limits["issue_limit"] == 200
+
+    issues = cast(list[dict[str, object]], scan_overview["issues"])
+    assert len(issues) == 200
+    # Error and warnings must come first
+    assert issues[0]["severity"] == "error"
+    assert issues[0]["kind"] == "permission_denied"
+    assert issues[1]["severity"] == "warning"
+    assert issues[2]["severity"] == "warning"
+    # The rest are info
+    assert all(item["severity"] == "info" for item in issues[3:])
+
+    groups = cast(list[dict[str, object]], scan_overview["issue_groups"])
+    assert len(groups) == 3
+    # Ordered by severity (error -> warning -> info)
+    assert groups[0]["severity"] == "error"
+    assert groups[0]["kind"] == "permission_denied"
+    assert groups[0]["count"] == 1
+    assert len(cast(list[object], groups[0]["samples"])) == 1
+    assert groups[0]["omitted_count"] == 0
+
+    assert groups[1]["severity"] == "warning"
+    assert groups[1]["kind"] == "broken_repository"
+    assert groups[1]["count"] == 2
+    assert len(cast(list[object], groups[1]["samples"])) == 2
+    assert groups[1]["omitted_count"] == 0
+
+    assert groups[2]["severity"] == "info"
+    assert groups[2]["kind"] == "symlink_skipped"
+    assert groups[2]["count"] == 1096
+    assert len(cast(list[object], groups[2]["samples"])) == 3
+    assert groups[2]["omitted_count"] == 1093
+
+    # Audit verification: all 1099 issues remain in SQLite
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    total_stored = connection.execute(
+        "SELECT COUNT(*) FROM scan_issues WHERE scan_run_id = ?",
+        (scan_run_id,),
+    ).fetchone()[0]
+    connection.close()
+    assert total_stored == 1099
+
