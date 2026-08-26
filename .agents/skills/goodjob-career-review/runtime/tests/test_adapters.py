@@ -101,7 +101,7 @@ def test_cpp_adapter_emits_bounded_locatable_implementation_evidence() -> None:
     result = analyze_file(
         relative_path="src/main.cpp",
         text=(
-            '#include <thread>\n'
+            "#include <thread>\n"
             '#include "router.hpp"\n'
             "class Router { public: void serve(); };\n"
             "void Router::serve() { std::thread worker; }\n"
@@ -165,9 +165,7 @@ def test_cpp_adapter_reports_parse_failure_and_fact_truncation() -> None:
         base_evidence_kind="implementation",
     )
     assert len(many_functions.facts) == MAX_FACTS_PER_FILE
-    assert {diagnostic.kind for diagnostic in many_functions.diagnostics} == {
-        "analysis_truncated"
-    }
+    assert {diagnostic.kind for diagnostic in many_functions.diagnostics} == {"analysis_truncated"}
 
 
 def test_cmake_manifest_uses_cpp_adapter_without_executing_cmake() -> None:

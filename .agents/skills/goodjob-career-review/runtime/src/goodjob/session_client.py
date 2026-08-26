@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +30,7 @@ class SessionClient:
     """Official task-scoped host session client for GoodJob broker operations.
 
     Encapsulates subprocess lifecycle, preflight verification, stdin/stdout JSON lines protocol,
-    and process reclamation. Strictly adheres to single-task scope without daemons or background state.
+    and process reclamation. Strictly adheres to single-task scope without daemons.
     """
 
     def __init__(
@@ -43,7 +42,9 @@ class SessionClient:
         launcher_script: str | Path | None = None,
         timeout_seconds: float = 300.0,
     ) -> None:
-        self.workspace = str(Path(workspace).expanduser().resolve(strict=False)) if workspace else None
+        self.workspace = (
+            str(Path(workspace).expanduser().resolve(strict=False)) if workspace else None
+        )
         self.data_dir = str(Path(data_dir).expanduser().resolve()) if data_dir else None
         self.agent_runtime = agent_runtime
         self.timeout_seconds = timeout_seconds
@@ -83,7 +84,9 @@ class SessionClient:
         try:
             report: Any = json.loads(stdout if stdout.strip() else stderr)
         except (json.JSONDecodeError, ValueError) as exc:
-            raise SessionPreflightError(f"Preflight output is not valid JSON: {stdout or stderr}") from exc
+            raise SessionPreflightError(
+                f"Preflight output is not valid JSON: {stdout or stderr}"
+            ) from exc
 
         if not isinstance(report, dict):
             raise SessionPreflightError(f"Preflight output is not a JSON object: {report}")
@@ -127,7 +130,12 @@ class SessionClient:
 
     def send(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send a JSON payload to the broker and return the parsed JSON response."""
-        if not self.is_running or self._process is None or self._process.stdin is None or self._process.stdout is None:
+        if (
+            not self.is_running
+            or self._process is None
+            or self._process.stdin is None
+            or self._process.stdout is None
+        ):
             raise BrokerProcessError("Broker process is not running")
 
         try:
@@ -158,7 +166,9 @@ class SessionClient:
         try:
             response = json.loads(response_line)
         except (json.JSONDecodeError, ValueError) as exc:
-            raise BrokerProtocolError(f"Invalid JSON line from broker: {response_line.strip()}") from exc
+            raise BrokerProtocolError(
+                f"Invalid JSON line from broker: {response_line.strip()}"
+            ) from exc
 
         if not isinstance(response, dict):
             raise BrokerProtocolError(f"Broker returned non-dict response: {response}")
@@ -288,10 +298,8 @@ class SessionClient:
         proc = self._process
         self._process = None
         if proc.stdin and not proc.stdin.closed:
-            try:
+            with contextlib.suppress(Exception):
                 proc.stdin.close()
-            except Exception:
-                pass
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:

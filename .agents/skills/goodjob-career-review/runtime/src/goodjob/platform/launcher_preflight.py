@@ -270,7 +270,8 @@ _POSIX_READY_STATUSES: tuple[tuple[str, CheckStatus], ...] = (
     ("git_sandbox", _PASSED),
 )
 _POSIX_WORKSPACE_READY_STATUSES: tuple[tuple[str, CheckStatus], ...] = (
-    (*_POSIX_READY_STATUSES, ("workspace_filesystem", _PASSED))
+    *_POSIX_READY_STATUSES,
+    ("workspace_filesystem", _PASSED),
 )
 _WINDOWS_READY_STATUSES: tuple[tuple[str, CheckStatus], ...] = tuple(
     (check_id, _PASSED) for check_id in WINDOWS_PREFLIGHT_REQUIRED_CHECK_IDS
@@ -716,11 +717,7 @@ def evaluate_launcher_preflight(
                 )
             )
         else:
-            action = (
-                "use_local_workspace"
-                if platform == "macos"
-                else "use_local_workspace_or_wsl2"
-            )
+            action = "use_local_workspace" if platform == "macos" else "use_local_workspace_or_wsl2"
             checks.append(
                 failed_check(
                     "workspace_filesystem",

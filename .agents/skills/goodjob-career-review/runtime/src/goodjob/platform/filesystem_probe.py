@@ -85,8 +85,8 @@ def _macos_statfs(path: Path) -> FilesystemInfo:
     if statfs(encoded_path, ctypes.byref(result)) != 0:
         error_number = ctypes.get_errno()
         raise OSError(error_number, os.strerror(error_number))
-    filesystem_type = bytes(result.f_fstypename).split(b"\0", 1)[0].decode(
-        "ascii", errors="replace"
+    filesystem_type = (
+        bytes(result.f_fstypename).split(b"\0", 1)[0].decode("ascii", errors="replace")
     )
     return FilesystemInfo(
         filesystem_type=filesystem_type or None,
@@ -98,10 +98,11 @@ def _macos_statfs(path: Path) -> FilesystemInfo:
 def _default_statfs(path: Path) -> FilesystemInfo:
     if sys.platform == "darwin":
         return _macos_statfs(path)
-    # Linux's statvfs does not expose a portable filesystem type.  It is still
-    # useful as a local path existence probe; the Linux sandbox remains the
-    # authority for filesystem access isolation.
-    os.statvfs(path)
+    statvfs = getattr(os, "statvfs", None)
+    if statvfs is not None:
+        statvfs(path)
+    else:
+        path.stat()
     return FilesystemInfo(filesystem_type="platform-local", flags=None, is_local=True)
 
 
@@ -119,8 +120,7 @@ def _unsupported_result(info: FilesystemInfo, *, reason: str) -> FilesystemProbe
         filesystem_type=filesystem_type,
         flags=info.flags,
         message=(
-            "The workspace filesystem is not supported for protected local scanning "
-            f"({reason})."
+            f"The workspace filesystem is not supported for protected local scanning ({reason})."
         ),
         remediation="Move or reselect the workspace on a local APFS/HFS/Linux filesystem, "
         "then run preflight again; remote execution and automatic copying are not available.",

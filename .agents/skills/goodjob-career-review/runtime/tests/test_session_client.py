@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import json
-import sqlite3
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from goodjob.session_client import (
     BrokerProcessError,
-    BrokerProtocolError,
     SessionClient,
-    SessionClientError,
-    SessionPreflightError,
 )
 
 
@@ -47,7 +40,9 @@ def test_session_client_lifecycle_and_happy_path(tmp_path: Path) -> None:
         receipt_id = auth_resp["receipt"]["authorization_receipt_id"]
 
         # 2. Validate Job Input
-        val_resp = client.validate_job_input(authorization_receipt_id=receipt_id, target_role="系统工程师")
+        val_resp = client.validate_job_input(
+            authorization_receipt_id=receipt_id, target_role="系统工程师"
+        )
         assert val_resp["status"] == "ok"
         val_sha = val_resp["job_input"]["validation_sha256"]
 
@@ -89,10 +84,9 @@ def test_session_client_process_reap_on_exception(tmp_path: Path) -> None:
     workspace.mkdir()
 
     client = SessionClient(workspace=workspace, data_dir=tmp_path / "data")
-    with pytest.raises(RuntimeError, match="simulated host error"):
-        with client:
-            assert client.is_running is True
-            raise RuntimeError("simulated host error")
+    with pytest.raises(RuntimeError, match="simulated host error"), client:
+        assert client.is_running is True
+        raise RuntimeError("simulated host error")
 
     assert client.is_running is False
 
@@ -111,4 +105,3 @@ def test_session_client_premature_broker_exit(tmp_path: Path) -> None:
             client.authorize_source_analysis(confirmed=True)
 
     assert client.is_running is False
-

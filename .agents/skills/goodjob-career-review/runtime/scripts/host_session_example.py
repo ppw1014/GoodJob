@@ -14,7 +14,6 @@ This script demonstrates the official lifecycle:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -22,8 +21,7 @@ from pathlib import Path
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR / "src"))
 
-from goodjob.session_client import (
-    BrokerProcessError,
+from goodjob.session_client import (  # noqa: E402
     SessionClient,
     SessionClientError,
     SessionPreflightError,
@@ -31,7 +29,9 @@ from goodjob.session_client import (
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GoodJob Host Session Client Reference Integration")
+    parser = argparse.ArgumentParser(
+        description="GoodJob Host Session Client Reference Integration"
+    )
     parser.add_argument("--workspace", required=True, help="Path to authorized workspace")
     parser.add_argument("--data-dir", default=None, help="Path to GoodJob state directory")
     parser.add_argument("--role", default="系统工程师", help="Target role name for career review")
@@ -49,8 +49,10 @@ def main() -> int:
     print("[host] Running platform preflight check...")
     try:
         preflight_report = client.run_preflight()
-        print(f"[host] Preflight status: {preflight_report.get('status')} (can_start: {preflight_report.get('can_start_broker')})")
-        if not preflight_report.get("can_start_broker"):
+        status = preflight_report.get("status")
+        can_start = preflight_report.get("can_start_broker")
+        print(f"[host] Preflight status: {status} (can_start: {can_start})")
+        if not can_start:
             print("[host] Preflight failed; cannot start broker session.", file=sys.stderr)
             return 2
     except SessionPreflightError as exc:
@@ -72,7 +74,9 @@ def main() -> int:
 
             # Step 4: Validate Job Input
             print(f"[host] Validating target role '{args.role}'...")
-            val_resp = client.validate_job_input(authorization_receipt_id=receipt_id, target_role=args.role)
+            val_resp = client.validate_job_input(
+                authorization_receipt_id=receipt_id, target_role=args.role
+            )
             if val_resp.get("status") != "ok":
                 print(f"[host] Job input validation failed: {val_resp}", file=sys.stderr)
                 return 1
@@ -87,7 +91,9 @@ def main() -> int:
             if scan_resp.get("status") != "ok":
                 print(f"[host] Scan failed: {scan_resp}", file=sys.stderr)
                 return 1
-            print(f"[host] Scan completed with status: {scan_resp.get('scan_run', {}).get('status')}")
+            print(
+                f"[host] Scan completed with status: {scan_resp.get('scan_run', {}).get('status')}"
+            )
 
             # Step 6: Scan Overview
             overview_resp = client.scan_overview(
@@ -97,9 +103,14 @@ def main() -> int:
             overview = overview_resp.get("scan_overview", {})
             limits = overview.get("limits", {})
             groups = overview.get("issue_groups", [])
-            print(f"[host] Overview: total issues = {limits.get('available_issues')}, groups = {len(groups)}")
+            avail = limits.get("available_issues")
+            print(f"[host] Overview: total issues = {avail}, groups = {len(groups)}")
             for group in groups:
-                print(f"  - [{group.get('severity')}] {group.get('kind')}: count={group.get('count')}, omitted={group.get('omitted_count')}")
+                sev = group.get("severity")
+                kind = group.get("kind")
+                cnt = group.get("count")
+                omit = group.get("omitted_count")
+                print(f"  - [{sev}] {kind}: count={cnt}, omitted={omit}")
 
         print("[host] Session completed cleanly. Broker subprocess reaped.")
         return 0

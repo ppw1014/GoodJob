@@ -871,7 +871,9 @@ class WorkspaceScanner:
                     WHEN 'error' THEN 0
                     WHEN 'warning' THEN 1
                     ELSE 2
-                END, kind, remediation, CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END, relative_path, issue_id
+                END, kind, remediation,
+                CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END,
+                relative_path, issue_id
                 """,
                 (selected_scan_run_id,),
             ).fetchall()

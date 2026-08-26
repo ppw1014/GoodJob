@@ -110,6 +110,7 @@ def classify_git_command_failure(
         "Repair the repository metadata and run refresh.",
     )
 
+
 # Resolution is delayed until a scanner is constructed so missing system tools
 # can cross the CLI boundary as a stable GoodJobError.
 GIT_EXECUTABLE = "/usr/bin/git"

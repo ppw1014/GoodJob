@@ -7,11 +7,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
-import uuid
 
 import pytest
 
@@ -384,7 +384,9 @@ def test_scan_indexes_cpp_sources_and_cmake_manifest_with_cpp_v1(tmp_path: Path)
         encoding="utf-8",
     )
 
-    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace, git_executable=sys.executable)
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data", workspace, git_executable=sys.executable
+    )
     result = scanner.scan(
         workspace_path=str(workspace),
         config_revision="cpp-v1",
@@ -1690,8 +1692,8 @@ def test_repo_manifest_metadata_escape_is_one_repository_level_diagnostic(
     assert len(layout_issues) == 1
     assert "repository/.git/config" in layout_issues[0].message
     assert not any(issue.kind == "symlink_skipped" for issue in result.issues)
-    database_text = (tmp_path / "data" / "goodjob.sqlite3").read_bytes().decode(
-        "utf-8", errors="ignore"
+    database_text = (
+        (tmp_path / "data" / "goodjob.sqlite3").read_bytes().decode("utf-8", errors="ignore")
     )
     assert "repo-manifest-private-sentinel" not in database_text
 
@@ -1757,8 +1759,7 @@ def test_direct_scanner_fails_before_discovery_for_unsupported_filesystem(
     assert result.issues[0].message == filesystem.message
     connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
     assert (
-        connection.execute("SELECT COUNT(*) FROM scan_runs WHERE status = 'failed'")
-        .fetchone()[0]
+        connection.execute("SELECT COUNT(*) FROM scan_runs WHERE status = 'failed'").fetchone()[0]
         == 1
     )
     assert connection.execute("SELECT COUNT(*) FROM scan_issues").fetchone()[0] == 1
@@ -2836,7 +2837,9 @@ def test_scan_overview_groups_repetitive_issues_and_retains_audit_records(
     workspace.mkdir()
     (workspace / "package.json").write_text("{}", encoding="utf-8")
 
-    scanner, receipt_id = _direct_scanner(tmp_path / "data", workspace, git_executable=sys.executable)
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data", workspace, git_executable=sys.executable
+    )
     result = scanner.scan(
         workspace_path=str(workspace),
         config_revision="test-v1",
@@ -2963,4 +2966,3 @@ def test_scan_overview_groups_repetitive_issues_and_retains_audit_records(
     ).fetchone()[0]
     connection.close()
     assert total_stored == 1099
-
