@@ -190,7 +190,7 @@ host agent 按以下顺序工作：
 
 每个终态扫描必须在 `EvidenceBundle` 和下游产物中呈现：发现项目数、fresh/carried-forward/failed-no-baseline/excluded 数量、工作树数、模块数、纳入/排除文件类别、`fast`/`verify_content` 检测模式、history basis、深读与基础分析语言、外部 Git 授权例外、每项 `ScanIssue` 的路径范围、原因、影响和补救动作。`coverage_status=complete` 只表示当次配置下合资格输入均被处理，不等于理解全部业务语义。
 
-`scan-overview-v2` 保留有界的 `issues` 和原有 `limits.issue_limit`、`limits.available_issues`、`limits.issues_truncated` 字段；额外以 `(severity, kind, remediation)` 提供确定性 `issue_groups`，每组包含总数、最多三个样本和省略数量。error/warning 优先占用 `issues` 配额，完整审计记录仍只存在 `scan_issues`。摘要必须由数据库聚合、窗口样本和有界原始问题查询生成，不能先把所有问题载入 host 进程后截断。
+`scan-overview-v2` 保留有界的 `issues` 和原有 `limits.issue_limit`、`limits.available_issues`、`limits.issues_truncated` 字段；额外以 `(severity, kind, remediation)` 提供确定性 `issue_groups`，每组包含总数、最多三个样本和省略数量。`limits.group_limit` 与 `limits.groups_truncated` 明确分组摘要的边界。error/warning 优先占用 `issues` 配额；二者合计超限时，配额在两个非空严重级别间轮转，避免任一级别被另一方完全挤出。完整审计记录仍只存在 `scan_issues`。摘要必须由数据库聚合、窗口样本和有界原始问题查询生成，不能先把所有问题载入 host 进程后截断。
 
 | ID | 可判定输入 | 必须输出 | 失败或降级行为 | 需求映射 |
 | --- | --- | --- | --- | --- |

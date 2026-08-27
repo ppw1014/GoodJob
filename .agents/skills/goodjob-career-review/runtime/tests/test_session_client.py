@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
+import os
+import queue
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -43,11 +47,14 @@ def _write_session_launcher(
     *,
     handshake_stderr_bytes: int = 0,
     stall_handshake: bool = False,
+    oversized_handshake: bool = False,
+    child_pid_path: Path | None = None,
 ) -> None:
     path.write_text(
         """#!/usr/bin/env python3
 import json
 import pathlib
+import subprocess
 import sys
 import time
 
@@ -55,10 +62,16 @@ REPORT = json.loads(REPORT_JSON)
 OPERATIONS = pathlib.Path(OPERATIONS_PATH)
 HANDSHAKE_STDERR_BYTES = HANDSHAKE_STDERR_BYTES_VALUE
 STALL_HANDSHAKE = STALL_HANDSHAKE_VALUE
+OVERSIZED_HANDSHAKE = OVERSIZED_HANDSHAKE_VALUE
+CHILD_PID_PATH = CHILD_PID_PATH_VALUE
 
 if "--preflight-only" in sys.argv:
     print(json.dumps(REPORT))
     raise SystemExit(0)
+
+if CHILD_PID_PATH:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    pathlib.Path(CHILD_PID_PATH).write_text(str(child.pid), encoding="utf-8")
 
 for line in sys.stdin:
     request = json.loads(line)
@@ -73,6 +86,11 @@ for line in sys.stdin:
             sys.stderr.flush()
         if STALL_HANDSHAKE:
             time.sleep(30)
+        if OVERSIZED_HANDSHAKE:
+            sys.stdout.buffer.write(b"x" * (64 * 1024 + 1))
+            sys.stdout.buffer.flush()
+            time.sleep(30)
+            continue
         response = {
             "status": "ok",
             "session": {"contract_version": "goodjob-session-v1", "state": "ready"},
@@ -93,7 +111,9 @@ for line in sys.stdin:
 """.replace("REPORT_JSON", repr(json.dumps(report)))
         .replace("OPERATIONS_PATH", repr(str(operations)))
         .replace("HANDSHAKE_STDERR_BYTES_VALUE", str(handshake_stderr_bytes))
-        .replace("STALL_HANDSHAKE_VALUE", repr(stall_handshake)),
+        .replace("STALL_HANDSHAKE_VALUE", repr(stall_handshake))
+        .replace("OVERSIZED_HANDSHAKE_VALUE", repr(oversized_handshake))
+        .replace("CHILD_PID_PATH_VALUE", repr(str(child_pid_path) if child_pid_path else None)),
         encoding="utf-8",
     )
 
@@ -105,6 +125,25 @@ import time
 
 time.sleep(30)
 """,
+        encoding="utf-8",
+    )
+
+
+def _write_non_utf8_preflight_launcher(path: Path, report: dict[str, object]) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+import time
+
+REPORT = json.loads(REPORT_JSON)
+if "--preflight-only" in sys.argv:
+    sys.stdout.buffer.write(json.dumps(REPORT).encode("utf-8") + b"\\xff\\n")
+    sys.stdout.buffer.flush()
+    raise SystemExit(0)
+
+time.sleep(30)
+""".replace("REPORT_JSON", repr(json.dumps(report))),
         encoding="utf-8",
     )
 
@@ -130,6 +169,17 @@ def test_session_client_start_cannot_bypass_strict_preflight(tmp_path: Path) -> 
         assert not broker_started.exists()
     finally:
         client.close()
+
+
+def test_session_client_rejects_non_utf8_preflight_output(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    report = SessionClient(workspace=workspace).run_preflight()
+    launcher = tmp_path / "fake_launcher.py"
+    _write_non_utf8_preflight_launcher(launcher, report)
+
+    with pytest.raises(SessionPreflightError, match="UTF-8"):
+        SessionClient(workspace=workspace, launcher_script=launcher).run_preflight()
 
 
 def test_session_client_start_requires_versioned_handshake(tmp_path: Path) -> None:
@@ -237,6 +287,69 @@ def test_session_client_handshake_timeout_reaps_broker(tmp_path: Path) -> None:
         client.start()
 
     assert client.is_running is False
+
+
+def test_session_client_rejects_oversized_broker_jsonl(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    report = SessionClient(workspace=workspace).run_preflight()
+    launcher = tmp_path / "fake_launcher.py"
+    _write_session_launcher(
+        launcher,
+        report,
+        tmp_path / "operations",
+        oversized_handshake=True,
+    )
+    client = SessionClient(workspace=workspace, launcher_script=launcher, timeout_seconds=1.0)
+
+    with pytest.raises(BrokerProtocolError, match="oversized"):
+        client.start()
+
+    assert client.is_running is False
+
+
+def test_session_client_stdout_reader_bounds_pending_responses() -> None:
+    client = SessionClient()
+    client._stdout_lines = queue.Queue(maxsize=1)
+
+    client._read_stdout(io.BytesIO(b"{}\n{}\n"))
+
+    assert isinstance(client._stdout_fault, BrokerProtocolError)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process group semantics are POSIX-specific")
+def test_session_client_timeout_reaps_the_broker_process_group(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    report = SessionClient(workspace=workspace).run_preflight()
+    launcher = tmp_path / "fake_launcher.py"
+    child_pid_path = tmp_path / "broker-child.pid"
+    _write_session_launcher(
+        launcher,
+        report,
+        tmp_path / "operations",
+        stall_handshake=True,
+        child_pid_path=child_pid_path,
+    )
+    client = SessionClient(
+        workspace=workspace,
+        launcher_script=launcher,
+        timeout_seconds=0.1,
+    )
+
+    with pytest.raises(BrokerTimeoutError, match="bounded timeout"):
+        client.start()
+
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("broker descendant survived client timeout cleanup")
 
 
 def test_session_client_drains_broker_stderr_while_waiting_for_response(tmp_path: Path) -> None:

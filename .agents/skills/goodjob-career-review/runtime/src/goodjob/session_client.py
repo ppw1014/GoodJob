@@ -3,13 +3,16 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import Any, BinaryIO, cast
 
 from goodjob.errors import GoodJobError, InvalidInputError
 from goodjob.platform.launcher_preflight import (
@@ -39,22 +42,27 @@ class BrokerTimeoutError(BrokerProcessError):
     """Raised when a bounded broker exchange does not complete in time."""
 
 
+MAX_BROKER_JSONL_BYTES = 64 * 1024
+MAX_BROKER_PENDING_RESPONSES = 8
+MAX_BROKER_STDERR_BYTES = 16 * 1024
+_STREAM_POLL_SECONDS = 0.05
+
+
 class _SessionPreflightRouter:
     """Record the trusted routing outcome without executing remediation actions."""
 
     def __init__(self) -> None:
         self.start_allowed = False
         self.runtime_contract_gap = False
-        self.facts: tuple[LauncherPreflightFact, ...] = ()
 
     def start_broker(self) -> None:
         self.start_allowed = True
 
-    def explain(self, facts: tuple[LauncherPreflightFact, ...]) -> None:
-        self.facts = facts
+    def explain(self, _facts: tuple[LauncherPreflightFact, ...]) -> None:
+        return None
 
-    def request_explicit_consent(self, facts: tuple[LauncherPreflightFact, ...]) -> None:
-        self.facts = facts
+    def request_explicit_consent(self, _facts: tuple[LauncherPreflightFact, ...]) -> None:
+        return None
 
     def report_runtime_contract_gap(self) -> None:
         self.runtime_contract_gap = True
@@ -90,9 +98,14 @@ class SessionClient:
             runtime_dir = Path(__file__).resolve().parents[2]
             self.launcher_script = runtime_dir / "scripts" / "launch_broker.py"
 
-        self._process: subprocess.Popen[str] | None = None
-        self._stdout_lines: queue.Queue[str | BaseException | None] = queue.Queue()
-        self._stderr_chunks: deque[str] = deque()
+        self._process: subprocess.Popen[bytes] | None = None
+        self._process_group_isolated = False
+        self._stdout_lines: queue.Queue[str | BaseException | None] = queue.Queue(
+            maxsize=MAX_BROKER_PENDING_RESPONSES
+        )
+        self._stdout_fault: BaseException | None = None
+        self._stdout_fault_lock = threading.Lock()
+        self._stderr_chunks: deque[bytes] = deque()
         self._stderr_size = 0
         self._stderr_lock = threading.Lock()
         self._request_lock = threading.Lock()
@@ -115,22 +128,21 @@ class SessionClient:
             command.extend(["--agent-runtime", self.agent_runtime])
 
         try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            process, process_group_isolated = self._spawn_process(command)
         except OSError as exc:
             raise SessionPreflightError(f"Preflight process could not start: {exc}") from exc
         try:
-            stdout, stderr = process.communicate(timeout=min(self.timeout_seconds, 60.0))
+            stdout_bytes, stderr_bytes = process.communicate(
+                timeout=min(self.timeout_seconds, 60.0)
+            )
         except subprocess.TimeoutExpired as exc:
-            process.kill()
-            process.communicate()
+            self._terminate_process_tree(process, process_group_isolated)
             raise SessionPreflightError("Preflight process exceeded its bounded timeout") from exc
+        try:
+            stdout = stdout_bytes.decode("utf-8")
+            stderr = stderr_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SessionPreflightError("Launcher preflight output must be valid UTF-8") from exc
         try:
             report: Any = json.loads(stdout)
         except (json.JSONDecodeError, ValueError):
@@ -174,14 +186,8 @@ class SessionClient:
             command.extend(["--agent-runtime", self.agent_runtime])
 
         try:
-            self._process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+            self._process, self._process_group_isolated = self._spawn_process(
+                command, stdin=subprocess.PIPE
             )
         except OSError as exc:
             raise BrokerProcessError(f"Failed to launch broker process: {exc}") from exc
@@ -212,20 +218,28 @@ class SessionClient:
             raise BrokerProcessError("Broker process is not running")
 
         try:
-            line = json.dumps(payload) + chr(10)
+            line = json.dumps(payload).encode("utf-8") + b"\n"
             self._process.stdin.write(line)
             self._process.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             self.close()
             raise BrokerProcessError("Broker stdin write failed (process may have exited)") from exc
 
-        try:
-            response_item = self._stdout_lines.get(timeout=self.timeout_seconds)
-        except queue.Empty as exc:
-            self._terminate_process()
-            raise BrokerTimeoutError("Broker response exceeded its bounded timeout") from exc
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            self._raise_stdout_fault()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._terminate_process()
+                raise BrokerTimeoutError("Broker response exceeded its bounded timeout")
+            try:
+                response_item = self._stdout_lines.get(timeout=min(remaining, _STREAM_POLL_SECONDS))
+                break
+            except queue.Empty:
+                continue
 
         if response_item is None:
+            self._raise_stdout_fault()
             exit_code = self._process.poll()
             stderr_out = self._stderr_tail()
             self.close()
@@ -239,7 +253,7 @@ class SessionClient:
 
         try:
             response = json.loads(response_line)
-        except (json.JSONDecodeError, ValueError) as exc:
+        except (json.JSONDecodeError, RecursionError, ValueError) as exc:
             self.close()
             raise BrokerProtocolError(
                 f"Invalid JSON line from broker: {response_line.strip()}"
@@ -253,7 +267,9 @@ class SessionClient:
     def _start_stream_readers(self) -> None:
         if self._process is None or self._process.stdout is None or self._process.stderr is None:
             raise AssertionError("broker streams must exist before readers start")
-        self._stdout_lines = queue.Queue()
+        self._stdout_lines = queue.Queue(maxsize=MAX_BROKER_PENDING_RESPONSES)
+        with self._stdout_fault_lock:
+            self._stdout_fault = None
         self._stderr_chunks = deque()
         self._stderr_size = 0
         stdout_reader = threading.Thread(
@@ -272,22 +288,43 @@ class SessionClient:
         for reader in self._reader_threads:
             reader.start()
 
-    def _read_stdout(self, stream: TextIO) -> None:
+    def _read_stdout(self, stream: BinaryIO) -> None:
         try:
-            for line in stream:
-                self._stdout_lines.put(line)
+            while raw_line := stream.readline(MAX_BROKER_JSONL_BYTES + 1):
+                if len(raw_line) > MAX_BROKER_JSONL_BYTES or not raw_line.endswith(b"\n"):
+                    self._record_stdout_fault(
+                        BrokerProtocolError(
+                            "Broker returned an oversized or unterminated JSON line"
+                        )
+                    )
+                    return
+                try:
+                    line = raw_line.decode("utf-8")
+                except UnicodeDecodeError:
+                    self._record_stdout_fault(
+                        BrokerProtocolError("Broker returned a non-UTF-8 JSON line")
+                    )
+                    return
+                try:
+                    self._stdout_lines.put_nowait(line)
+                except queue.Full:
+                    self._record_stdout_fault(
+                        BrokerProtocolError("Broker exceeded the bounded pending response limit")
+                    )
+                    return
         except (OSError, UnicodeError, ValueError) as exc:
-            self._stdout_lines.put(exc)
+            self._record_stdout_fault(exc)
         finally:
-            self._stdout_lines.put(None)
+            with contextlib.suppress(queue.Full):
+                self._stdout_lines.put_nowait(None)
 
-    def _drain_stderr(self, stream: TextIO) -> None:
+    def _drain_stderr(self, stream: BinaryIO) -> None:
         try:
             while chunk := stream.read(4096):
                 with self._stderr_lock:
                     self._stderr_chunks.append(chunk)
                     self._stderr_size += len(chunk)
-                    while self._stderr_size > 16_384 and self._stderr_chunks:
+                    while self._stderr_size > MAX_BROKER_STDERR_BYTES and self._stderr_chunks:
                         removed = self._stderr_chunks.popleft()
                         self._stderr_size -= len(removed)
         except (OSError, UnicodeError, ValueError):
@@ -295,7 +332,24 @@ class SessionClient:
 
     def _stderr_tail(self) -> str:
         with self._stderr_lock:
-            return "".join(self._stderr_chunks)[-16_384:]
+            return b"".join(self._stderr_chunks)[-MAX_BROKER_STDERR_BYTES:].decode(
+                "utf-8", errors="replace"
+            )
+
+    def _record_stdout_fault(self, fault: BaseException) -> None:
+        with self._stdout_fault_lock:
+            if self._stdout_fault is None:
+                self._stdout_fault = fault
+
+    def _raise_stdout_fault(self) -> None:
+        with self._stdout_fault_lock:
+            fault = self._stdout_fault
+        if fault is None:
+            return
+        self.close()
+        if isinstance(fault, BrokerProtocolError):
+            raise fault
+        raise BrokerProcessError("Broker stdout read failed") from fault
 
     def handshake(self) -> dict[str, Any]:
         """Confirm the broker's versioned task-scoped session protocol."""
@@ -456,14 +510,15 @@ class SessionClient:
             return
         proc = self._process
         self._process = None
+        process_group_isolated = self._process_group_isolated
+        self._process_group_isolated = False
         if proc.stdin and not proc.stdin.closed:
             with contextlib.suppress(Exception):
                 proc.stdin.close()
         try:
             proc.wait(timeout=min(self.timeout_seconds, 5.0))
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            self._terminate_process_tree(proc, process_group_isolated)
         self._close_process_streams(proc)
 
     def _terminate_process(self) -> None:
@@ -471,12 +526,71 @@ class SessionClient:
             return
         proc = self._process
         self._process = None
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
+        process_group_isolated = self._process_group_isolated
+        self._process_group_isolated = False
+        self._terminate_process_tree(proc, process_group_isolated)
         self._close_process_streams(proc)
 
-    def _close_process_streams(self, proc: subprocess.Popen[str]) -> None:
+    def _spawn_process(
+        self,
+        command: list[str],
+        *,
+        stdin: int | None = None,
+    ) -> tuple[subprocess.Popen[bytes], bool]:
+        process_options: dict[str, Any] = {
+            "stdin": stdin,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        process_group_isolated = False
+        if os.name == "posix":
+            process_options["start_new_session"] = True
+            process_group_isolated = True
+        elif os.name == "nt":
+            creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if creation_flags:
+                process_options["creationflags"] = creation_flags
+                process_group_isolated = True
+        return cast(subprocess.Popen[bytes], subprocess.Popen(command, **process_options)), (
+            process_group_isolated
+        )
+
+    def _terminate_process_tree(
+        self, proc: subprocess.Popen[bytes], process_group_isolated: bool
+    ) -> None:
+        terminated_tree = False
+        if process_group_isolated and os.name == "posix":
+            killpg = getattr(os, "killpg", None)
+            sigkill = getattr(signal, "SIGKILL", None)
+            if killpg is not None and sigkill is not None:
+                with contextlib.suppress(OSError, ProcessLookupError):
+                    killpg(proc.pid, sigkill)
+                    terminated_tree = True
+        elif process_group_isolated and os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=min(self.timeout_seconds, 5.0),
+                )
+                terminated_tree = True
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if not terminated_tree and proc.poll() is None:
+            with contextlib.suppress(OSError, ProcessLookupError):
+                proc.kill()
+        try:
+            proc.wait(timeout=min(self.timeout_seconds, 5.0))
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError, ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=min(self.timeout_seconds, 5.0))
+
+    def _close_process_streams(self, proc: subprocess.Popen[bytes]) -> None:
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is not None and not stream.closed:
                 with contextlib.suppress(Exception):

@@ -146,6 +146,10 @@ def _default_statfs(path: Path) -> FilesystemInfo:
         return _macos_statfs(path)
     if sys.platform.startswith("linux"):
         return _linux_statfs(path)
+    if sys.platform == "win32":
+        # Native Windows uses its dedicated NTFS preflight; retain the established
+        # platform-local result for direct scanner callers.
+        return FilesystemInfo(filesystem_type="platform-local", flags=None, is_local=True)
     statvfs = getattr(os, "statvfs", None)
     if statvfs is not None:
         statvfs(path)

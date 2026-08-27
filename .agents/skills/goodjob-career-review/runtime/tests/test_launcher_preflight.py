@@ -188,6 +188,17 @@ def test_linux_filesystem_magic_classification_fails_closed_for_remote_or_unknow
     assert result.filesystem_type == expected_type
 
 
+def test_windows_default_filesystem_probe_retains_direct_scanner_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    result = probe_workspace_filesystem(Path("C:/owner-authorized/workspace"))
+
+    assert result.status == "supported"
+    assert result.filesystem_type == "platform-local"
+
+
 @pytest.mark.parametrize("status", ["supported", "unsupported", "unknown", "error"])
 def test_posix_preflight_consumes_workspace_filesystem_result(status: str) -> None:
     runtime = PythonRuntime(("python3.12",), "direct_python", (3, 12, 9))

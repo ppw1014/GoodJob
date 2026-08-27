@@ -89,6 +89,7 @@ MAX_ROLE_LENS_CONTEXT_EVIDENCE_SAMPLES = 500
 MAX_ROLE_LENS_CONTEXT_EVIDENCE_PER_PROJECT = 10
 SCAN_OVERVIEW_CONTRACT_VERSION = "scan-overview-v2"
 MAX_SCAN_OVERVIEW_ISSUES = 200
+MAX_SCAN_OVERVIEW_GROUPS = 200
 MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP = 3
 IGNORE_PATTERN_SYNTAX: tuple[tuple[str, str], ...] = (
     ("literal_name", "supported"),
@@ -374,6 +375,36 @@ def _issue(
         message=_short(message),
         remediation=_short(remediation),
     )
+
+
+def _overview_issue_quotas(
+    *,
+    issue_limit: int,
+    error_count: int,
+    warning_count: int,
+    info_count: int,
+) -> tuple[int, int, int]:
+    """Bound the raw list without allowing one serious severity to starve another."""
+    serious_count = error_count + warning_count
+    if serious_count <= issue_limit:
+        return error_count, warning_count, min(info_count, issue_limit - serious_count)
+
+    quotas = {"error": 0, "warning": 0}
+    counts = {"error": error_count, "warning": warning_count}
+    remaining = issue_limit
+    while remaining:
+        made_progress = False
+        for severity in ("error", "warning"):
+            if remaining == 0:
+                break
+            if quotas[severity] >= counts[severity]:
+                continue
+            quotas[severity] += 1
+            remaining -= 1
+            made_progress = True
+        if not made_progress:
+            break
+    return quotas["error"], quotas["warning"], 0
 
 
 @dataclass(frozen=True)
@@ -853,7 +884,9 @@ class WorkspaceScanner:
                             "issue_limit": MAX_SCAN_OVERVIEW_ISSUES,
                             "available_issues": 0,
                             "issues_truncated": False,
+                            "group_limit": MAX_SCAN_OVERVIEW_GROUPS,
                             "group_count": 0,
+                            "groups_truncated": False,
                             "error_count": 0,
                             "warning_count": 0,
                             "info_count": 0,
@@ -878,6 +911,26 @@ class WorkspaceScanner:
             warning_count = counts_by_severity.get("warning", 0)
             info_count = counts_by_severity.get("info", 0)
             issue_count = error_count + warning_count + info_count
+            error_quota, warning_quota, info_quota = _overview_issue_quotas(
+                issue_limit=MAX_SCAN_OVERVIEW_ISSUES,
+                error_count=error_count,
+                warning_count=warning_count,
+                info_count=info_count,
+            )
+            group_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) AS group_count
+                    FROM (
+                        SELECT 1
+                        FROM scan_issues
+                        WHERE scan_run_id = ?
+                        GROUP BY severity, kind, remediation
+                    )
+                    """,
+                    (selected_scan_run_id,),
+                ).fetchone()["group_count"]
+            )
 
             group_rows = connection.execute(
                 """
@@ -890,21 +943,40 @@ class WorkspaceScanner:
                     WHEN 'warning' THEN 1
                     ELSE 2
                 END, kind, remediation
+                LIMIT ?
                 """,
-                (selected_scan_run_id,),
+                (selected_scan_run_id, MAX_SCAN_OVERVIEW_GROUPS),
             ).fetchall()
             sample_rows = connection.execute(
                 """
-                WITH ranked_samples AS (
-                    SELECT issue_id, project_id, artifact_id, kind, severity,
-                           relative_path, message, remediation,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY severity, kind, remediation
-                               ORDER BY CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END,
-                                        relative_path, issue_id
-                           ) AS sample_rank
+                WITH selected_groups AS (
+                    SELECT severity, kind, remediation
                     FROM scan_issues
                     WHERE scan_run_id = ?
+                    GROUP BY severity, kind, remediation
+                    ORDER BY CASE severity
+                        WHEN 'error' THEN 0
+                        WHEN 'warning' THEN 1
+                        ELSE 2
+                    END, kind, remediation
+                    LIMIT ?
+                ), ranked_samples AS (
+                    SELECT issues.issue_id, issues.project_id, issues.artifact_id, issues.kind,
+                           issues.severity, issues.relative_path, issues.message,
+                           issues.remediation,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY issues.severity, issues.kind, issues.remediation
+                               ORDER BY CASE WHEN issues.relative_path IS NULL THEN 1 ELSE 0 END,
+                                        issues.relative_path, issues.message,
+                                        COALESCE(issues.project_id, ''),
+                                        COALESCE(issues.artifact_id, ''), issues.issue_id
+                           ) AS sample_rank
+                    FROM scan_issues AS issues
+                    JOIN selected_groups AS groups
+                      ON groups.severity = issues.severity
+                     AND groups.kind = issues.kind
+                     AND groups.remediation = issues.remediation
+                    WHERE issues.scan_run_id = ?
                 )
                 SELECT issue_id, project_id, artifact_id, kind, severity,
                        relative_path, message, remediation
@@ -916,7 +988,12 @@ class WorkspaceScanner:
                     ELSE 2
                 END, kind, remediation, sample_rank
                 """,
-                (selected_scan_run_id, MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP),
+                (
+                    selected_scan_run_id,
+                    MAX_SCAN_OVERVIEW_GROUPS,
+                    selected_scan_run_id,
+                    MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP,
+                ),
             ).fetchall()
             samples_by_group: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
             for sample in sample_rows:
@@ -950,18 +1027,34 @@ class WorkspaceScanner:
 
             issue_rows = connection.execute(
                 """
+                WITH ranked_issues AS (
+                    SELECT issue_id, project_id, artifact_id, kind, severity,
+                           relative_path, message, remediation,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY severity
+                               ORDER BY CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END,
+                                        relative_path, kind, remediation, message,
+                                        COALESCE(project_id, ''), COALESCE(artifact_id, ''),
+                                        issue_id
+                           ) AS severity_rank
+                    FROM scan_issues
+                    WHERE scan_run_id = ?
+                )
                 SELECT issue_id, project_id, artifact_id, kind, severity,
                        relative_path, message, remediation
-                FROM scan_issues
-                WHERE scan_run_id = ?
+                FROM ranked_issues
+                WHERE (severity = 'error' AND severity_rank <= ?)
+                   OR (severity = 'warning' AND severity_rank <= ?)
+                   OR (severity = 'info' AND severity_rank <= ?)
                 ORDER BY CASE severity
                     WHEN 'error' THEN 0
                     WHEN 'warning' THEN 1
                     ELSE 2
-                END, issue_id
-                LIMIT ?
+                END, CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END,
+                     relative_path, kind, remediation, message,
+                     COALESCE(project_id, ''), COALESCE(artifact_id, ''), issue_id
                 """,
-                (selected_scan_run_id, MAX_SCAN_OVERVIEW_ISSUES),
+                (selected_scan_run_id, error_quota, warning_quota, info_quota),
             ).fetchall()
         return {
             "status": "ok",
@@ -998,7 +1091,9 @@ class WorkspaceScanner:
                     "issue_limit": MAX_SCAN_OVERVIEW_ISSUES,
                     "available_issues": issue_count,
                     "issues_truncated": issue_count > len(issue_rows),
-                    "group_count": len(issue_groups),
+                    "group_limit": MAX_SCAN_OVERVIEW_GROUPS,
+                    "group_count": group_count,
+                    "groups_truncated": group_count > len(issue_groups),
                     "error_count": error_count,
                     "warning_count": warning_count,
                     "info_count": info_count,

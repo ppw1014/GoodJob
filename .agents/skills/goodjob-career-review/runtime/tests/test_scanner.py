@@ -31,6 +31,7 @@ from goodjob.scanner import (
     ProjectPlan,
     WorkspaceScanner,
     _open_regular_file,
+    _overview_issue_quotas,
 )
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
@@ -3137,6 +3138,13 @@ def test_scan_overview_small_quota_is_deterministic_and_preserves_v1_fields(
     assert v1_compatible["issue_limit"] == 2
     assert v1_compatible["issues_truncated"] is True
     assert len(cast(list[object], v1_compatible["issues"])) == 2
+    assert [
+        (str(issue["severity"]), str(issue["relative_path"]))
+        for issue in cast(list[dict[str, object]], v1_compatible["issues"])
+    ] == [
+        ("error", "blocked/a"),
+        ("warning", "warning/a"),
+    ]
 
     groups = cast(list[dict[str, object]], scan_overview["issue_groups"])
     shared_groups = [group for group in groups if group["kind"] == "shared_kind"]
@@ -3144,3 +3152,151 @@ def test_scan_overview_small_quota_is_deterministic_and_preserves_v1_fields(
         ("first remediation", 1),
         ("second remediation", 1),
     ]
+
+
+def test_scan_overview_bounds_high_cardinality_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "package.json").write_text("{}", encoding="utf-8")
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data", workspace, git_executable=sys.executable
+    )
+    result = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="overview-group-cap-v1",
+        authorization_receipt_id=receipt_id,
+    )
+    assert result.status == "completed"
+
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    for index in range(4):
+        connection.execute(
+            """
+            INSERT INTO scan_issues (
+                issue_id, scan_run_id, project_id, artifact_id, kind,
+                severity, relative_path, message, remediation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                result.scan_run_id,
+                None,
+                None,
+                "same_kind",
+                "info",
+                f"path/{index}",
+                f"fixture {index}",
+                f"distinct remediation {index}",
+            ),
+        )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(scanner_module, "MAX_SCAN_OVERVIEW_GROUPS", 2)
+    overview = _object_field(
+        scanner.overview(workspace_path=str(workspace), scan_run_id=result.scan_run_id),
+        "scan_overview",
+    )
+    limits = _object_field(overview, "limits")
+    groups = cast(list[dict[str, object]], overview["issue_groups"])
+
+    assert limits["group_limit"] == 2
+    assert limits["group_count"] == 4
+    assert limits["groups_truncated"] is True
+    assert len(groups) == 2
+    assert [group["remediation"] for group in groups] == [
+        "distinct remediation 0",
+        "distinct remediation 1",
+    ]
+
+
+def test_scan_overview_quota_preserves_each_present_serious_severity() -> None:
+    assert _overview_issue_quotas(
+        issue_limit=200,
+        error_count=201,
+        warning_count=1,
+        info_count=0,
+    ) == (199, 1, 0)
+
+
+def test_scan_overview_has_stable_semantic_order_across_equivalent_runs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "package.json").write_text("{}", encoding="utf-8")
+    scanner, receipt_id = _direct_scanner(
+        tmp_path / "data", workspace, git_executable=sys.executable
+    )
+    first_run = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="overview-repeat-v1",
+        authorization_receipt_id=receipt_id,
+    )
+    second_run = scanner.scan(
+        workspace_path=str(workspace),
+        config_revision="overview-repeat-v1",
+        authorization_receipt_id=receipt_id,
+    )
+    assert first_run.status == second_run.status == "completed"
+
+    fixtures = (
+        ("same_kind", "warning", "second remediation", "z/path", "repeat z"),
+        ("same_kind", "warning", "first remediation", "a/path", "repeat a"),
+        ("permission_denied", "error", "repair permissions", "m/path", "repeat error"),
+    )
+    connection = sqlite3.connect(tmp_path / "data" / "goodjob.sqlite3")
+    for scan_run_id in (first_run.scan_run_id, second_run.scan_run_id):
+        for kind, severity, remediation, relative_path, message in fixtures:
+            connection.execute(
+                """
+                INSERT INTO scan_issues (
+                    issue_id, scan_run_id, project_id, artifact_id, kind,
+                    severity, relative_path, message, remediation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    scan_run_id,
+                    None,
+                    None,
+                    kind,
+                    severity,
+                    relative_path,
+                    message,
+                    remediation,
+                ),
+            )
+    connection.commit()
+    connection.close()
+
+    def semantic_signature(scan_run_id: str) -> tuple[object, object]:
+        overview = _object_field(
+            scanner.overview(workspace_path=str(workspace), scan_run_id=scan_run_id),
+            "scan_overview",
+        )
+        issues = [
+            (
+                issue["severity"],
+                issue["kind"],
+                issue["relative_path"],
+                issue["message"],
+                issue["remediation"],
+            )
+            for issue in cast(list[dict[str, object]], overview["issues"])
+        ]
+        groups = [
+            (
+                group["severity"],
+                group["kind"],
+                group["remediation"],
+                [
+                    (sample["relative_path"], sample["message"])
+                    for sample in cast(list[dict[str, object]], group["samples"])
+                ],
+            )
+            for group in cast(list[dict[str, object]], overview["issue_groups"])
+        ]
+        return issues, groups
+
+    assert semantic_signature(first_run.scan_run_id) == semantic_signature(second_run.scan_run_id)

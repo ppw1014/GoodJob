@@ -132,6 +132,9 @@ def test_cpp_adapter_ignores_comments_strings_and_preprocessor_macros() -> None:
             "#define DECLARE_CONTINUED_FAKE \\\n"
             "class ContinuedMacroFake {}; \\\n"
             "void continued_macro_fake() { socket(1, 2, 3); }\n"
+            "#define DECLARE_CONTINUED_INCLUDE \\\n"
+            "#include <hidden/network.h>\n"
+            "#include <visible/thread.h>\n"
             "struct Visible { int value; };\n"
         ),
         artifact_kind="source",
@@ -147,6 +150,13 @@ def test_cpp_adapter_ignores_comments_strings_and_preprocessor_macros() -> None:
     assert "Visible" in symbols
     assert not {"Commented", "StringFake", "MacroFake", "ContinuedMacroFake"} & symbols
     assert "capability_boundary" not in {fact.evidence_kind for fact in result.facts}
+    included_modules = {
+        dict(fact.locator_fields).get("module")
+        for fact in result.facts
+        if fact.evidence_kind == "technology_usage"
+    }
+    assert "visible/thread.h" in included_modules
+    assert "hidden/network.h" not in included_modules
 
 
 def test_cpp_adapter_reports_parse_failure_and_fact_truncation() -> None:
@@ -197,6 +207,9 @@ def test_cmake_comments_do_not_create_build_facts() -> None:
             "#[[\n"
             "add_library(commented_library source.cpp)\n"
             "]]\n"
+            'message("find_package(string_fake)")\n'
+            "set(fake [[add_executable(bracket_fake main.cpp)]])\n"
+            "message(find_package(nested_fake))\n"
             "project(real_project)\n"
         ),
         artifact_kind="manifest",
