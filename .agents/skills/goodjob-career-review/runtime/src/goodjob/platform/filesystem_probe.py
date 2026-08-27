@@ -30,6 +30,28 @@ _NETWORK_FILESYSTEM_TYPES = frozenset(
         "webdav",
     }
 )
+_LINUX_LOCAL_FILESYSTEM_MAGICS = {
+    0xEF53: "ext",
+    0x58465342: "xfs",
+    0x9123683E: "btrfs",
+    0x01021994: "tmpfs",
+    0x794C7630: "overlay",
+    0x2FC12FC1: "zfs",
+    0x858458F6: "ramfs",
+    0x4D44: "msdos",
+    0x2011BAB0: "exfat",
+    0x5346544E: "ntfs",
+}
+_LINUX_UNSUPPORTED_FILESYSTEM_MAGICS = {
+    0x6969: "nfs",
+    0x517B: "smb",
+    0xFF534D42: "cifs",
+    0xFE534D42: "smb2",
+    0x65735546: "fuse",
+    0x5346414F: "afs",
+    0x73757245: "coda",
+    0x564C: "ncp",
+}
 
 
 @dataclass(frozen=True)
@@ -95,15 +117,41 @@ def _macos_statfs(path: Path) -> FilesystemInfo:
     )
 
 
+def _linux_filesystem_info(magic: int) -> FilesystemInfo:
+    normalized = magic & ((1 << (ctypes.sizeof(ctypes.c_long) * 8)) - 1)
+    if normalized in _LINUX_LOCAL_FILESYSTEM_MAGICS:
+        return FilesystemInfo(_LINUX_LOCAL_FILESYSTEM_MAGICS[normalized], None, True)
+    if normalized in _LINUX_UNSUPPORTED_FILESYSTEM_MAGICS:
+        return FilesystemInfo(_LINUX_UNSUPPORTED_FILESYSTEM_MAGICS[normalized], None, False)
+    return FilesystemInfo(f"linux-magic-0x{normalized:x}", None, None)
+
+
+def _linux_statfs(path: Path) -> FilesystemInfo:
+    libc = ctypes.CDLL(None, use_errno=True)
+    statfs = getattr(libc, "statfs", None)
+    if statfs is None:
+        raise OSError("Linux statfs is unavailable")
+    statfs.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    statfs.restype = ctypes.c_int
+    result = ctypes.create_string_buffer(512)
+    if statfs(os.fsencode(path), ctypes.byref(result)) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    magic = int(ctypes.c_long.from_buffer(result).value)
+    return _linux_filesystem_info(magic)
+
+
 def _default_statfs(path: Path) -> FilesystemInfo:
     if sys.platform == "darwin":
         return _macos_statfs(path)
+    if sys.platform.startswith("linux"):
+        return _linux_statfs(path)
     statvfs = getattr(os, "statvfs", None)
     if statvfs is not None:
         statvfs(path)
     else:
         path.stat()
-    return FilesystemInfo(filesystem_type="platform-local", flags=None, is_local=True)
+    return FilesystemInfo(filesystem_type=None, flags=None, is_local=None)
 
 
 def _filesystem_type_is_unsupported(filesystem_type: str) -> bool:
@@ -151,7 +199,7 @@ def probe_workspace_filesystem(
     if not filesystem_type or filesystem_type == "unknown" or info.is_local is None:
         return FilesystemProbeResult(
             status="unknown",
-            filesystem_type="unknown",
+            filesystem_type=filesystem_type,
             flags=info.flags,
             message="The workspace filesystem type is unknown, so protected local scanning cannot "
             "prove its capability.",

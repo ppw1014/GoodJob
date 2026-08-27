@@ -425,6 +425,7 @@ class SessionBroker:
         self._preparation_runs: dict[str, PreparationBinding] = {}
         self._validated_job_inputs: dict[str, str] = {}
         self._translation_projections: dict[str, TranslationProjectionBinding] = {}
+        self._terminal_state: str | None = None
 
     def dispatch(self, message: JsonObject) -> JsonObject:
         require_released_runtime()
@@ -435,6 +436,23 @@ class SessionBroker:
                     "the requested workspace does not match this session's prerequisite preflight"
                 )
         operation = _required_text(message, "op")
+        if operation == "session_handshake":
+            return {
+                "status": "ok",
+                "session": {"contract_version": "goodjob-session-v1", "state": "ready"},
+            }
+        if operation == "session_complete":
+            self._terminal_state = "completed"
+            return {
+                "status": "ok",
+                "session": {"contract_version": "goodjob-session-v1", "state": "completed"},
+            }
+        if operation == "session_cancel":
+            self._terminal_state = "cancelled"
+            return {
+                "status": "ok",
+                "session": {"contract_version": "goodjob-session-v1", "state": "cancelled"},
+            }
         if operation == "authorize_source_analysis":
             return self._authorize_source_analysis(message).payload
         if operation == "verify_source_analysis":
@@ -476,6 +494,10 @@ class SessionBroker:
         if operation == "read_history_candidate":
             return self._read_history_candidate(message).payload
         raise InvalidInputError(f"unsupported session broker operation: {operation}")
+
+    @property
+    def terminal_state(self) -> str | None:
+        return self._terminal_state
 
     def _authorize_source_analysis(self, message: JsonObject) -> CoreResponse:
         if message.get("confirmed") is not True:
@@ -1692,6 +1714,8 @@ def run(
                 "message": "session broker input could not be processed safely",
             }
         print(json.dumps(response, ensure_ascii=True, sort_keys=True), flush=True)
+        if broker.terminal_state is not None:
+            break
     return 0
 
 

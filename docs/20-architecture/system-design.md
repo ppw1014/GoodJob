@@ -118,7 +118,7 @@ Windows launcher 的状态机固定为 `security_ready -> suspended -> assigned 
 
 ### 3.6 `ARCH-C08`：launcher 预检边界
 
-`launch_broker.py --preflight-only` 在源码授权与个人数据目录建立之前调用。它先用离线、禁止下载的运行时探测选择 Python，再由 `launcher_preflight.py` 的唯一注册表定义平台、launcher kind、必需 check 集合、顺序、notice 及可信 remediation 组合；producer 和 strict parser 共同读取该注册表。macOS/Linux 检查 Python 与既有 Git sandbox backend；传入 `--workspace` 时还读取只读 `statfs` 能力并对网络/FUSE、未知类型和探测失败 fail-closed。scanner 直接入口复用同一能力边界；unsupported 平台固定失败；Windows 只把旧 prerequisite 子进程已经验证的同一份报告无损映射到新 envelope。
+`launch_broker.py --preflight-only` 在源码授权与个人数据目录建立之前调用。它先用离线、禁止下载的运行时探测选择 Python，再由 `launcher_preflight.py` 的唯一注册表定义平台、launcher kind、必需 check 集合、顺序、notice 及可信 remediation 组合；producer 和 strict parser 共同读取该注册表。macOS/Linux 检查 Python 与既有 Git sandbox backend；传入 `--workspace` 时还读取只读 `statfs` 能力并对网络/FUSE、未知类型和探测失败 fail-closed，Linux 只认可明确的本地 filesystem magic。scanner 直接入口复用同一根路径保护，并在绑定每个工作树的 `git_dir/common_dir` 后、执行 Git 或读取授权外部元数据前复查这些必需路径；unsupported 平台固定失败；Windows 只把旧 prerequisite 子进程已经验证的同一份报告无损映射到新 envelope。
 
 预检状态机只有 `produced -> validated -> ready|blocked`。未通过 strict parser 的 producer 输出转为受信 protocol failure，不能启动 broker。ready 的预检模式只在 stdout 输出 v1 并退出 `0`；blocked 只在 stdout 输出 v1 并退出 `2`。普通模式的 ready 状态不输出 launcher 诊断并进入 broker；任何 broker 建立前失败只在 stderr 输出一份 accepted v1 并退出 `2`。参数语法错误位于本协议之外。Windows prerequisite 进程无论完成、超时或中断都必须被 wait；session 内的第二次检查不因 launcher 报告而省略。
 

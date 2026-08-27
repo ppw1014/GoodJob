@@ -16,6 +16,7 @@ from goodjob.platform.detect import (
     resolve_git_executable,
     sandbox_failure_reason,
 )
+from goodjob.platform.filesystem_probe import FilesystemProbeResult
 
 
 def test_detect_platform_returns_current_platform() -> None:
@@ -185,6 +186,13 @@ def test_git_state_reports_sandbox_unavailable_with_enablement_guidance(
         safe_history_path=lambda _path: True,
         git_command_timeout_seconds=lambda: 10.0,
         workspace_git_command=lambda _binding, _arguments: [],
+        filesystem_probe=lambda _path: FilesystemProbeResult(
+            status="supported",
+            filesystem_type="fixture",
+            flags=None,
+            message="fixture local filesystem",
+            remediation="",
+        ),
     )
     monkeypatch.setattr(reader, "_bind_internal_git", lambda _root, _workspace: MagicMock())
 
@@ -203,6 +211,75 @@ def test_git_state_reports_sandbox_unavailable_with_enablement_guidance(
     assert issue.severity == "error"
     assert "bwrap" in issue.remediation
     assert "user namespaces" in issue.remediation
+
+
+def test_external_git_metadata_filesystem_is_checked_before_any_external_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import goodjob.git_metadata as git_metadata
+    from goodjob.git_metadata import ExternalGitGrant, GitMetadataReader
+    from goodjob.scanner import _issue
+
+    workspace = tmp_path / "workspace"
+    linked = workspace / "linked"
+    workspace.mkdir()
+    linked.mkdir()
+    external_git_dir = tmp_path / "external-git"
+    external_common_dir = tmp_path / "external-common"
+    metadata_paths: list[Path] = []
+
+    def filesystem_probe(path: Path) -> FilesystemProbeResult:
+        metadata_paths.append(path)
+        if path == external_git_dir:
+            return FilesystemProbeResult(
+                status="unsupported",
+                filesystem_type="nfs",
+                flags=None,
+                message="fixture external metadata filesystem",
+                remediation="select a local filesystem",
+            )
+        return FilesystemProbeResult(
+            status="supported",
+            filesystem_type="ext",
+            flags=None,
+            message="fixture local filesystem",
+            remediation="",
+        )
+
+    reader = GitMetadataReader(
+        git_executable="/usr/bin/git",
+        issue_factory=_issue,
+        safe_history_path=lambda _path: True,
+        git_command_timeout_seconds=lambda: 10.0,
+        workspace_git_command=lambda _binding, _arguments: [],
+        filesystem_probe=filesystem_probe,
+    )
+    monkeypatch.setattr(
+        git_metadata,
+        "inspect_external_git_candidate",
+        lambda *_args: pytest.fail(
+            "external metadata must not be read before capability validation"
+        ),
+    )
+    grant = ExternalGitGrant(
+        git_pointer_path=linked / ".git",
+        marker_kind="file",
+        git_dir=external_git_dir,
+        common_dir=external_common_dir,
+        git_dir_device=1,
+        git_dir_inode=2,
+        common_dir_device=1,
+        common_dir_inode=3,
+        authorization_receipt_id="receipt",
+        confirmed_at="2026-08-27T00:00:00Z",
+    )
+
+    state, issue = reader._external_git_state(linked, workspace, linked / ".git", grant)
+
+    assert state is None
+    assert issue is not None
+    assert issue.kind == "git_metadata_filesystem_unsupported"
+    assert metadata_paths == [linked, external_git_dir]
 
 
 # --- macOS SeatbeltSandbox tests ---

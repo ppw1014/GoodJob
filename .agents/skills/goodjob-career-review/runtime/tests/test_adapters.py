@@ -129,6 +129,9 @@ def test_cpp_adapter_ignores_comments_strings_and_preprocessor_macros() -> None:
             "// class Commented {};\n"
             'const char* text = "class StringFake {}; socket(";\n'
             "#define DECLARE_FAKE class MacroFake {}\n"
+            "#define DECLARE_CONTINUED_FAKE \\\n"
+            "class ContinuedMacroFake {}; \\\n"
+            "void continued_macro_fake() { socket(1, 2, 3); }\n"
             "struct Visible { int value; };\n"
         ),
         artifact_kind="source",
@@ -142,7 +145,7 @@ def test_cpp_adapter_ignores_comments_strings_and_preprocessor_macros() -> None:
         if fact.evidence_kind == "symbol_definition"
     }
     assert "Visible" in symbols
-    assert not {"Commented", "StringFake", "MacroFake"} & symbols
+    assert not {"Commented", "StringFake", "MacroFake", "ContinuedMacroFake"} & symbols
     assert "capability_boundary" not in {fact.evidence_kind for fact in result.facts}
 
 
@@ -183,6 +186,27 @@ def test_cmake_manifest_uses_cpp_adapter_without_executing_cmake() -> None:
         "entry_configuration",
         "module_boundary",
     }
+
+
+def test_cmake_comments_do_not_create_build_facts() -> None:
+    result = analyze_file(
+        relative_path="CMakeLists.txt",
+        text=(
+            "# find_package(CommentedDependency)\n"
+            "# add_executable(commented_app main.cpp)\n"
+            "#[[\n"
+            "add_library(commented_library source.cpp)\n"
+            "]]\n"
+            "project(real_project)\n"
+        ),
+        artifact_kind="manifest",
+        adapter_id="cpp",
+        base_evidence_kind="manifest",
+    )
+
+    assert not [
+        fact for fact in result.facts if dict(fact.locator_fields).get("build_system") == "cmake"
+    ]
 
 
 def test_manifest_declaration_does_not_masquerade_as_actual_usage() -> None:

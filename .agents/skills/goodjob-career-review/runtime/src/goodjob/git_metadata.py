@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, cast
 from goodjob.errors import InvalidInputError
 from goodjob.platform import GitSandboxUnavailableError, select_git_sandbox
 from goodjob.platform.detect import Platform, detect_platform, sandbox_failure_reason
+from goodjob.platform.filesystem_probe import FilesystemProbeResult, probe_workspace_filesystem
 from goodjob.platform.fs_windows import WindowsDirectory
 from goodjob.platform.handles_windows import (
     close_owned_resources,
@@ -535,12 +536,55 @@ class GitMetadataReader:
         safe_history_path: Callable[[str], bool],
         git_command_timeout_seconds: Callable[[], float],
         workspace_git_command: Callable[[InternalGitBinding, tuple[str, ...]], list[str]],
+        filesystem_probe: Callable[[Path], FilesystemProbeResult] = probe_workspace_filesystem,
     ) -> None:
         self._git_executable = git_executable
         self._issue = issue_factory
         self._safe_history_path = safe_history_path
         self._timeout = git_command_timeout_seconds
         self._workspace_git_command = workspace_git_command
+        self._filesystem_probe = filesystem_probe
+
+    def _metadata_filesystem_issue(
+        self,
+        paths: tuple[Path, ...],
+        *,
+        root: Path,
+        workspace_root: Path,
+    ) -> ScanIssueDraft | None:
+        """Fail closed before reading or executing against required Git metadata."""
+        seen: set[Path] = set()
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                result = self._filesystem_probe(path)
+            except (OSError, ValueError):
+                result = FilesystemProbeResult(
+                    status="error",
+                    filesystem_type="unknown",
+                    flags=None,
+                    message="The Git metadata filesystem capability could not be probed safely.",
+                    remediation=(
+                        "Choose Git metadata on a readable local filesystem whose type can be "
+                        "verified, then run refresh."
+                    ),
+                )
+            if result.status == "supported":
+                continue
+            if result.status == "unsupported":
+                message = "Required Git metadata is on an unsupported filesystem."
+            else:
+                message = "Required Git metadata is on a filesystem whose capability is unknown."
+            return self._issue(
+                "git_metadata_filesystem_unsupported",
+                "warning",
+                message,
+                result.remediation,
+                _relative_path(root, workspace_root),
+            )
+        return None
 
     @staticmethod
     def _linked_worktree_relation_state(
@@ -692,6 +736,13 @@ class GitMetadataReader:
         grant: ExternalGitGrant,
     ) -> tuple[GitState | None, ScanIssueDraft | None]:
         relative_root = _relative_path(root, workspace_root)
+        filesystem_issue = self._metadata_filesystem_issue(
+            (root, grant.git_dir, grant.common_dir),
+            root=root,
+            workspace_root=workspace_root,
+        )
+        if filesystem_issue is not None:
+            return None, filesystem_issue
         try:
             inspected = inspect_external_git_candidate(workspace_root, marker)
             expected_common_candidate = (
@@ -931,6 +982,13 @@ class GitMetadataReader:
                 "Repair the repository metadata and run refresh.",
                 _relative_path(root, workspace_root),
             )
+        filesystem_issue = self._metadata_filesystem_issue(
+            (binding.worktree_root, binding.git_dir, binding.common_dir),
+            root=root,
+            workspace_root=workspace_root,
+        )
+        if filesystem_issue is not None:
+            return None, filesystem_issue
         try:
             include_result = self._git(
                 binding,

@@ -750,14 +750,15 @@ class WorkspaceScanner:
             resolve_git_executable() if git_executable is None else git_executable
         )
         self._git_executable = str(Path(resolved_git_executable).resolve(strict=True))
+        self._filesystem_probe = filesystem_probe
         self._git_metadata = GitMetadataReader(
             git_executable=self._git_executable,
             issue_factory=_issue,
             safe_history_path=_safe_history_path,
             git_command_timeout_seconds=lambda: GIT_COMMAND_TIMEOUT_SECONDS,
             workspace_git_command=lambda binding, arguments: self._git_command(binding, arguments),
+            filesystem_probe=self._filesystem_probe,
         )
-        self._filesystem_probe = filesystem_probe
         self._analysis_cache: dict[tuple[str, str, str, str, str, str], AnalysisResult] = {}
 
     def scan(
@@ -861,7 +862,93 @@ class WorkspaceScanner:
                 }
             selected_scan_run_id = str(row["scan_run_id"])
             coverage = self._overview_coverage(connection, row, selected_scan_run_id)
-            all_issues = connection.execute(
+            count_rows = connection.execute(
+                """
+                SELECT severity, COUNT(*) AS issue_count
+                FROM scan_issues
+                WHERE scan_run_id = ?
+                GROUP BY severity
+                """,
+                (selected_scan_run_id,),
+            ).fetchall()
+            counts_by_severity = {
+                str(item["severity"]): int(item["issue_count"]) for item in count_rows
+            }
+            error_count = counts_by_severity.get("error", 0)
+            warning_count = counts_by_severity.get("warning", 0)
+            info_count = counts_by_severity.get("info", 0)
+            issue_count = error_count + warning_count + info_count
+
+            group_rows = connection.execute(
+                """
+                SELECT severity, kind, remediation, COUNT(*) AS issue_count
+                FROM scan_issues
+                WHERE scan_run_id = ?
+                GROUP BY severity, kind, remediation
+                ORDER BY CASE severity
+                    WHEN 'error' THEN 0
+                    WHEN 'warning' THEN 1
+                    ELSE 2
+                END, kind, remediation
+                """,
+                (selected_scan_run_id,),
+            ).fetchall()
+            sample_rows = connection.execute(
+                """
+                WITH ranked_samples AS (
+                    SELECT issue_id, project_id, artifact_id, kind, severity,
+                           relative_path, message, remediation,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY severity, kind, remediation
+                               ORDER BY CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END,
+                                        relative_path, issue_id
+                           ) AS sample_rank
+                    FROM scan_issues
+                    WHERE scan_run_id = ?
+                )
+                SELECT issue_id, project_id, artifact_id, kind, severity,
+                       relative_path, message, remediation
+                FROM ranked_samples
+                WHERE sample_rank <= ?
+                ORDER BY CASE severity
+                    WHEN 'error' THEN 0
+                    WHEN 'warning' THEN 1
+                    ELSE 2
+                END, kind, remediation, sample_rank
+                """,
+                (selected_scan_run_id, MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP),
+            ).fetchall()
+            samples_by_group: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+            for sample in sample_rows:
+                key = (str(sample["severity"]), str(sample["kind"]), str(sample["remediation"]))
+                samples_by_group.setdefault(key, []).append(sample)
+
+            issue_groups: list[dict[str, object]] = []
+            for group in group_rows:
+                key = (str(group["severity"]), str(group["kind"]), str(group["remediation"]))
+                samples = [
+                    {
+                        "issue_id": str(sample["issue_id"]),
+                        "project_id": sample["project_id"],
+                        "artifact_id": sample["artifact_id"],
+                        "relative_path": sample["relative_path"],
+                        "message": str(sample["message"]),
+                    }
+                    for sample in samples_by_group.get(key, ())
+                ]
+                count = int(group["issue_count"])
+                issue_groups.append(
+                    {
+                        "severity": key[0],
+                        "kind": key[1],
+                        "remediation": key[2],
+                        "count": count,
+                        "samples": samples,
+                        "omitted_count": max(0, count - len(samples)),
+                    }
+                )
+
+            issue_rows = connection.execute(
                 """
                 SELECT issue_id, project_id, artifact_id, kind, severity,
                        relative_path, message, remediation
@@ -871,63 +958,11 @@ class WorkspaceScanner:
                     WHEN 'error' THEN 0
                     WHEN 'warning' THEN 1
                     ELSE 2
-                END, kind, remediation,
-                CASE WHEN relative_path IS NULL THEN 1 ELSE 0 END,
-                relative_path, issue_id
+                END, issue_id
+                LIMIT ?
                 """,
-                (selected_scan_run_id,),
+                (selected_scan_run_id, MAX_SCAN_OVERVIEW_ISSUES),
             ).fetchall()
-            issue_count = len(all_issues)
-            error_count = sum(1 for item in all_issues if item["severity"] == "error")
-            warning_count = sum(1 for item in all_issues if item["severity"] == "warning")
-            info_count = issue_count - error_count - warning_count
-
-            grouped_map: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
-            for issue in all_issues:
-                key = (str(issue["severity"]), str(issue["kind"]), str(issue["remediation"]))
-                grouped_map.setdefault(key, []).append(issue)
-
-            severity_order = {"error": 0, "warning": 1, "info": 2}
-            sorted_group_keys = sorted(
-                grouped_map.keys(),
-                key=lambda k: (severity_order.get(k[0], 3), k[1], k[2]),
-            )
-
-            issue_groups: list[dict[str, object]] = []
-            for key in sorted_group_keys:
-                items = grouped_map[key]
-                samples = [
-                    {
-                        "issue_id": str(sample["issue_id"]),
-                        "project_id": sample["project_id"],
-                        "artifact_id": sample["artifact_id"],
-                        "relative_path": sample["relative_path"],
-                        "message": str(sample["message"]),
-                    }
-                    for sample in items[:MAX_SCAN_OVERVIEW_SAMPLES_PER_GROUP]
-                ]
-                issue_groups.append(
-                    {
-                        "severity": key[0],
-                        "kind": key[1],
-                        "remediation": key[2],
-                        "count": len(items),
-                        "samples": samples,
-                        "omitted_count": max(0, len(items) - len(samples)),
-                    }
-                )
-
-            critical_issues = [
-                item for item in all_issues if item["severity"] in ("error", "warning")
-            ]
-            other_issues = [
-                item for item in all_issues if item["severity"] not in ("error", "warning")
-            ]
-            critical_issues.sort(
-                key=lambda r: (0 if r["severity"] == "error" else 1, str(r["issue_id"]))
-            )
-            other_issues.sort(key=lambda r: str(r["issue_id"]))
-            issue_rows = (critical_issues + other_issues)[:MAX_SCAN_OVERVIEW_ISSUES]
         return {
             "status": "ok",
             "scan_overview": {
@@ -1627,11 +1662,25 @@ class WorkspaceScanner:
     def _has_repo_manifest_marker(workspace_root: Path, directory: Path) -> bool:
         try:
             relative_directory = _relative_to_root(directory, workspace_root)
-            marker = _child_relative(relative_directory, ".repo")
-            marker_stat = _safe_lstat(workspace_root, marker)
-        except (OSError, ValueError):
+            directory_fd = _open_directory(workspace_root, relative_directory)
+        except OSError:
             return False
-        return stat.S_ISDIR(marker_stat.st_mode)
+        try:
+            try:
+                entries = _bound_directory_entries(directory_fd)
+            except OSError:
+                return False
+            for entry in entries:
+                if entry.name.casefold() != ".repo":
+                    continue
+                try:
+                    marker_stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    return False
+                return stat.S_ISDIR(marker_stat.st_mode)
+            return False
+        finally:
+            _close_directory(directory_fd)
 
     def _git_metadata_topology(
         self,
@@ -1647,7 +1696,8 @@ class WorkspaceScanner:
             if git_dir is None:
                 return ()
             if not _is_within(git_dir, workspace_root):
-                return (".git/gitdir",) if manifest_scoped else ()
+                is_repo_metadata = any(part.casefold() == ".repo" for part in git_dir.parts)
+                return (".git/gitdir",) if manifest_scoped or is_repo_metadata else ()
         elif stat.S_ISDIR(marker_stat.st_mode):
             git_dir = workspace_root / PurePosixPath(marker_relative)
         else:
@@ -1753,6 +1803,19 @@ class WorkspaceScanner:
                         continue
                     child_relative = _child_relative(relative_directory, entry.name)
                     if entry.name.lower() == ".repo":
+                        issues.append(
+                            _issue(
+                                "repository_metadata_excluded",
+                                "info",
+                                "Repo/manifest metadata was excluded from source discovery.",
+                                (
+                                    "Authorize the manifest root when its Git metadata is "
+                                    "required; "
+                                    "GoodJob does not index .repo contents as source."
+                                ),
+                                child_relative,
+                            )
+                        )
                         continue
                     if stat.S_ISLNK(entry_stat.st_mode):
                         try:

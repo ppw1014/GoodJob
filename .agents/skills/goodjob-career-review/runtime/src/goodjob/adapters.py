@@ -427,12 +427,55 @@ def _cpp_code_view(text: str) -> str | None:
         return None
     output = list(literal_free)
     offset = 0
+    continued_directive = False
     for line in literal_free.splitlines(keepends=True):
-        if line.lstrip().startswith("#"):
+        is_directive = continued_directive or line.lstrip().startswith("#")
+        if is_directive:
             for index in range(offset, offset + len(line)):
                 if output[index] not in {"\n", "\r"}:
                     output[index] = " "
+        physical_line = line.rstrip("\r\n").rstrip(" \t")
+        continued_directive = is_directive and physical_line.endswith("\\")
         offset += len(line)
+    return "".join(output)
+
+
+def _without_cmake_comments(text: str) -> str:
+    """Blank CMake line and bracket comments while preserving source positions."""
+    output = list(text)
+    index = 0
+    quoted = False
+    escaped = False
+    while index < len(text):
+        character = text[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            index += 1
+            continue
+        if character == '"':
+            quoted = True
+            index += 1
+            continue
+        if character != "#":
+            index += 1
+            continue
+        bracket = re.match(r"#\[(=*)\[", text[index:])
+        if bracket is not None:
+            closing = "]" + bracket.group(1) + "]"
+            end = text.find(closing, index + bracket.end())
+            stop = len(text) if end < 0 else end + len(closing)
+        else:
+            end = text.find("\n", index + 1)
+            stop = len(text) if end < 0 else end
+        for position in range(index, stop):
+            if output[position] not in {"\n", "\r"}:
+                output[position] = " "
+        index = stop
     return "".join(output)
 
 
@@ -869,6 +912,8 @@ def _manifest_facts(filename: str, text: str, adapter_id: str) -> tuple[list[Ana
                     ),
                 )
     elif lower == "cmakelists.txt":
+        cmake_view = _without_cmake_comments(text)
+        line_starts = _line_starts(cmake_view)
         for pattern, evidence_kind, summary in (
             (
                 r"\bfind_package\s*\(",
@@ -896,14 +941,14 @@ def _manifest_facts(filename: str, text: str, adapter_id: str) -> tuple[list[Ana
                 "Declares a C/C++ subdirectory boundary in CMake.",
             ),
         ):
-            match = re.search(pattern, text)
+            match = re.search(pattern, cmake_view)
             if match is not None:
                 _append(
                     facts,
                     _fact(
                         evidence_kind,
                         summary,
-                        line=_line_number(_line_starts(text), match.start()),
+                        line=_line_number(line_starts, match.start()),
                         build_system="cmake",
                     ),
                 )

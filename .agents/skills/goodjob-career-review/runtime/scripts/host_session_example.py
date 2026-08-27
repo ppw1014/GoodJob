@@ -21,11 +21,35 @@ from pathlib import Path
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR / "src"))
 
+from goodjob.paths import DataPaths  # noqa: E402
 from goodjob.session_client import (  # noqa: E402
     SessionClient,
     SessionClientError,
     SessionPreflightError,
 )
+
+
+def request_owner_confirmation(workspace: Path, data_dir: Path) -> bool:
+    """Display the fixed authorization boundary and obtain a real Owner decision."""
+    print(f"[scope] Normalized workspace: {workspace}")
+    print("[scope] Processing category: source_analysis")
+    print(
+        "[scope] Local persistence: GoodJob stores receipts, scan metadata, evidence summaries, "
+        f"and generated artifacts under {data_dir}; source contents are not copied there."
+    )
+    print(
+        "[scope] Model processing: source files opened for evidence enter this host agent "
+        "session's model-processing boundary under the current product, account, and workspace "
+        "policies."
+    )
+    print(
+        "[scope] GoodJob adds no separate upload or telemetry channel and does not assess legal "
+        "or organization-policy compliance."
+    )
+    answer = input(
+        "[owner] Type 'authorize' only if you control this workspace and approve this scope: "
+    )
+    return answer.strip() == "authorize"
 
 
 def main() -> int:
@@ -38,11 +62,12 @@ def main() -> int:
     args = parser.parse_args()
 
     workspace_path = Path(args.workspace).resolve()
+    data_path = DataPaths.from_argument(args.data_dir).root
     print(f"[host] Initializing session client for workspace: {workspace_path}")
 
     client = SessionClient(
         workspace=workspace_path,
-        data_dir=args.data_dir,
+        data_dir=data_path,
     )
 
     # Step 1: Preflight
@@ -59,12 +84,16 @@ def main() -> int:
         print(f"[host] Preflight error: {exc}", file=sys.stderr)
         return 2
 
+    if not request_owner_confirmation(workspace_path, data_path):
+        print("[host] Owner did not authorize source analysis; broker was not started.")
+        return 1
+
     # Step 2: Task-scoped broker session
     print("[host] Starting broker session...")
     try:
         with client:
             # Step 3: Owner consent & authorization
-            print("[host] Authorizing source analysis with explicit owner confirmation...")
+            print("[host] Applying the Owner's explicit source-analysis confirmation...")
             auth_resp = client.authorize_source_analysis(confirmed=True)
             if auth_resp.get("status") != "ok":
                 print(f"[host] Authorization failed: {auth_resp}", file=sys.stderr)
