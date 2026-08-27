@@ -16,6 +16,7 @@ import pytest
 from goodjob.platform.filesystem_probe import (
     FilesystemInfo,
     FilesystemProbeResult,
+    _linux_filesystem_info,
     probe_workspace_filesystem,
 )
 from goodjob.platform.launcher_preflight import (
@@ -160,6 +161,42 @@ def test_filesystem_probe_retains_a_stable_failure_for_probe_errors() -> None:
     assert result.filesystem_type == "unknown"
     assert "private probe detail" not in result.message
     assert result.remediation
+
+
+@pytest.mark.parametrize(
+    ("magic", "expected_status", "expected_type"),
+    [
+        (0x6969, "unsupported", "nfs"),
+        (0x65735546, "unsupported", "fuse"),
+        (0xEF53, "supported", "ext"),
+        (0x0BADF00D, "unknown", "linux-magic-0xbadf00d"),
+    ],
+)
+def test_linux_filesystem_magic_classification_fails_closed_for_remote_or_unknown_types(
+    magic: int,
+    expected_status: str,
+    expected_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    result = probe_workspace_filesystem(
+        Path("/owner-authorized/workspace"),
+        statfs_probe=lambda _path: _linux_filesystem_info(magic),
+    )
+
+    assert result.status == expected_status
+    assert result.filesystem_type == expected_type
+
+
+def test_windows_default_filesystem_probe_retains_direct_scanner_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    result = probe_workspace_filesystem(Path("C:/owner-authorized/workspace"))
+
+    assert result.status == "supported"
+    assert result.filesystem_type == "platform-local"
 
 
 @pytest.mark.parametrize("status", ["supported", "unsupported", "unknown", "error"])

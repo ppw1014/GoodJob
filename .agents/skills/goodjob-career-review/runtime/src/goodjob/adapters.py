@@ -427,13 +427,130 @@ def _cpp_code_view(text: str) -> str | None:
         return None
     output = list(literal_free)
     offset = 0
+    continued_directive = False
     for line in literal_free.splitlines(keepends=True):
-        if line.lstrip().startswith("#"):
+        is_directive = continued_directive or line.lstrip().startswith("#")
+        if is_directive:
             for index in range(offset, offset + len(line)):
                 if output[index] not in {"\n", "\r"}:
                     output[index] = " "
+        physical_line = line.rstrip("\r\n").rstrip(" \t")
+        continued_directive = is_directive and physical_line.endswith("\\")
         offset += len(line)
     return "".join(output)
+
+
+def _cpp_include_view(comment_free: str) -> str:
+    """Keep standalone include directives while masking all other preprocessor bodies."""
+    output = list(comment_free)
+    offset = 0
+    continued_directive = False
+    for line in comment_free.splitlines(keepends=True):
+        physical_line = line.rstrip("\r\n").rstrip(" \t")
+        is_directive = continued_directive or line.lstrip().startswith("#")
+        is_standalone_include = (
+            not continued_directive
+            and _CPP_INCLUDE.match(line) is not None
+            and not physical_line.endswith("\\")
+        )
+        if is_directive and not is_standalone_include:
+            for index in range(offset, offset + len(line)):
+                if output[index] not in {"\n", "\r"}:
+                    output[index] = " "
+        continued_directive = is_directive and physical_line.endswith("\\")
+        offset += len(line)
+    return "".join(output)
+
+
+def _cmake_code_view(text: str) -> str:
+    """Blank CMake comments and literal arguments while preserving source positions."""
+    output = list(text)
+
+    def blank(start: int, stop: int) -> None:
+        for position in range(start, stop):
+            if output[position] not in {"\n", "\r"}:
+                output[position] = " "
+
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == '"':
+            start = index
+            index += 1
+            escaped = False
+            while index < len(text):
+                current = text[index]
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    index += 1
+                    break
+                index += 1
+            blank(start, index)
+            continue
+        bracket_argument = re.match(r"\[(=*)\[", text[index:]) if character == "[" else None
+        if bracket_argument is not None:
+            closing = "]" + bracket_argument.group(1) + "]"
+            end = text.find(closing, index + bracket_argument.end())
+            stop = len(text) if end < 0 else end + len(closing)
+            blank(index, stop)
+            index = stop
+            continue
+        if character != "#":
+            index += 1
+            continue
+        bracket_comment = re.match(r"#\[(=*)\[", text[index:])
+        if bracket_comment is not None:
+            closing = "]" + bracket_comment.group(1) + "]"
+            end = text.find(closing, index + bracket_comment.end())
+            stop = len(text) if end < 0 else end + len(closing)
+        else:
+            end = text.find("\n", index + 1)
+            stop = len(text) if end < 0 else end
+        blank(index, stop)
+        index = stop
+    return "".join(output)
+
+
+_CMAKE_COMMAND = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _cmake_command_positions(code_view: str) -> dict[str, int]:
+    """Return top-level CMake command names, refusing unbalanced input."""
+    positions: dict[str, int] = {}
+    depth = 0
+    index = 0
+    while index < len(code_view):
+        character = code_view[index]
+        if character == "(":
+            depth += 1
+            index += 1
+            continue
+        if character == ")":
+            if depth == 0:
+                return {}
+            depth -= 1
+            index += 1
+            continue
+        if depth == 0:
+            match = _CMAKE_COMMAND.match(code_view, index)
+            if match is not None:
+                next_index = match.end()
+                while next_index < len(code_view) and code_view[next_index].isspace():
+                    next_index += 1
+                if next_index < len(code_view) and code_view[next_index] == "(":
+                    positions.setdefault(match.group().casefold(), match.start())
+                index = match.end()
+                continue
+        index += 1
+    return positions if depth == 0 else {}
+
+
+def _without_cmake_comments(text: str) -> str:
+    """Backward-compatible name for the conservative CMake code view."""
+    return _cmake_code_view(text)
 
 
 def _cpp_delimiters_are_balanced(text: str) -> bool:
@@ -451,12 +568,13 @@ def _cpp_delimiters_are_balanced(text: str) -> bool:
 def _cpp_facts(text: str) -> tuple[list[AnalysisFact], bool]:
     facts: list[AnalysisFact] = []
     comment_free = _without_comments(text, line_marker="//", quote_characters="'\"")
+    include_view = _cpp_include_view(comment_free)
     code_view = _cpp_code_view(text)
     if code_view is None or not _cpp_delimiters_are_balanced(code_view):
         return facts, False
     line_starts = _line_starts(code_view)
 
-    for match in _CPP_INCLUDE.finditer(comment_free):
+    for match in _CPP_INCLUDE.finditer(include_view):
         delimiter, header = match.groups()
         dependency = header.split("/", 1)[0]
         _append(
@@ -869,41 +987,44 @@ def _manifest_facts(filename: str, text: str, adapter_id: str) -> tuple[list[Ana
                     ),
                 )
     elif lower == "cmakelists.txt":
-        for pattern, evidence_kind, summary in (
+        cmake_view = _cmake_code_view(text)
+        line_starts = _line_starts(cmake_view)
+        commands = _cmake_command_positions(cmake_view)
+        for command, evidence_kind, summary in (
             (
-                r"\bfind_package\s*\(",
+                "find_package",
                 "dependency_declaration",
                 "Declares a C/C++ package lookup in CMake.",
             ),
             (
-                r"\badd_executable\s*\(",
+                "add_executable",
                 "entry_configuration",
                 "Declares a C/C++ executable target in CMake.",
             ),
             (
-                r"\badd_library\s*\(",
+                "add_library",
                 "module_boundary",
                 "Declares a C/C++ library target in CMake.",
             ),
             (
-                r"\btarget_link_libraries\s*\(",
+                "target_link_libraries",
                 "dependency_declaration",
                 "Declares C/C++ target linkage in CMake.",
             ),
             (
-                r"\badd_subdirectory\s*\(",
+                "add_subdirectory",
                 "module_boundary",
                 "Declares a C/C++ subdirectory boundary in CMake.",
             ),
         ):
-            match = re.search(pattern, text)
-            if match is not None:
+            position = commands.get(command)
+            if position is not None:
                 _append(
                     facts,
                     _fact(
                         evidence_kind,
                         summary,
-                        line=_line_number(_line_starts(text), match.start()),
+                        line=_line_number(line_starts, position),
                         build_system="cmake",
                     ),
                 )

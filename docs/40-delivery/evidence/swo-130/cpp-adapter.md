@@ -13,7 +13,8 @@
   - 线程、网络、进程等系统调用产生 `capability_boundary`
   - `CMakeLists.txt` 声明产生 `dependency_declaration`、`entry_configuration`、`module_boundary`
 - **安全与边界防护**：
-  - 字符串字面量与注释预先清洗，避免宏、字符串伪造符号
+  - 字符串字面量、行/块注释和完整预处理器指令（包括反斜杠续行）预先清洗，避免宏、字符串伪造符号
+  - CMake 的行注释和 bracket 注释会在匹配 `find_package`、target 声明前清洗，注释文本不产生构建事实
   - 括号平衡校验；畸形源码产生 `source_parse_failed` 诊断，不抛异常
   - 单文件事实截断保护（`MAX_FACTS_PER_FILE`）
   - 不运行编译器、预处理器、构建脚本或仓库二进制

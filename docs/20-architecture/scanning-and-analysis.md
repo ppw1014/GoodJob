@@ -69,9 +69,9 @@ Git 元数据损坏时，该候选项目产生 `broken_repository` 类 `ScanIssu
 
 ### 3.4 POSIX 工作区文件系统能力预检
 
-macOS/Linux launcher 在收到 `--workspace` 时，在启动 broker 或 Git 前对工作区路径做只读文件系统能力探测。macOS 优先读取系统 `statfs` 的 filesystem type 与 local flag：APFS/HFS 等已知本地类型可继续，sshfs、macFUSE/FUSE、NFS、SMB、WebDAV 及其他明确非本地类型返回 `workspace_filesystem` failed check 和 `unsupported_capability` remediation；未知类型或探测失败也 fail-closed，并保留稳定的 type/flags 诊断字段，不解析本地化 stderr。Linux 的 bwrap 仍是访问隔离权威，普通本地路径维持既有行为。
+macOS/Linux launcher 在收到 `--workspace` 时，在启动 broker 或 Git 前对工作区路径做只读文件系统能力探测。macOS 读取系统 `statfs` 的 filesystem type 与 local flag；Linux 读取 `statfs.f_type` 并只识别明确的本地 filesystem magic。APFS/HFS、ext、XFS、Btrfs、tmpfs、overlay 等已知本地类型可继续；sshfs、macFUSE/FUSE、NFS、SMB、WebDAV 及其他明确非本地类型返回 `workspace_filesystem` failed check 和 `unsupported_capability` remediation。未知类型或探测失败在两个平台都 fail-closed，并保留稳定的 type/flags 诊断字段，不解析本地化 stderr。Linux 的 bwrap 仍是实际访问隔离权威，但不构成对未知或远程文件系统的默认放行。
 
-同一能力探测也在 scanner 直接入口执行，失败会在已建立的终态 `ScanRun` 中写入一个 `workspace_filesystem_unsupported` error，随后返回结构化 `failed` 结果；因此绕过 launcher 不会把挂载问题泛化成 Git boundary issue。探测只调用本地系统 API，不通过 SSH 远程执行、不自动复制工作区、不自动换根。完整 issue 仍写入 SQLite，overview 的摘要展示规则见 §5。
+同一能力探测也在 scanner 直接入口执行，根路径失败会在已建立的终态 `ScanRun` 中写入一个 `workspace_filesystem_unsupported` error，随后返回结构化 `failed` 结果；因此绕过 launcher 不会把挂载问题泛化成 Git boundary issue。对每个候选工作树，scanner 在 descriptor-bound 解析出工作树根、`git_dir` 和 `common_dir` 后、任何 Git 子进程前再次探测这些必需路径；已授权的外部 Git 元数据也在打开外部目录前遵守相同规则。非 supported 结果阻断该工作树并产生 `git_metadata_filesystem_unsupported`，不读取外部元数据、不执行 Git。探测只调用本地系统 API，不通过 SSH 远程执行、不自动复制工作区、不自动换根。完整 issue 仍写入 SQLite，overview 的摘要展示规则见 §8。
 
 ### 3.5 原生 Windows 文件系统与 Git 边界
 
@@ -189,6 +189,8 @@ host agent 按以下顺序工作：
 ## 8. 覆盖报告与可判定验收规则
 
 每个终态扫描必须在 `EvidenceBundle` 和下游产物中呈现：发现项目数、fresh/carried-forward/failed-no-baseline/excluded 数量、工作树数、模块数、纳入/排除文件类别、`fast`/`verify_content` 检测模式、history basis、深读与基础分析语言、外部 Git 授权例外、每项 `ScanIssue` 的路径范围、原因、影响和补救动作。`coverage_status=complete` 只表示当次配置下合资格输入均被处理，不等于理解全部业务语义。
+
+`scan-overview-v2` 保留有界的 `issues` 和原有 `limits.issue_limit`、`limits.available_issues`、`limits.issues_truncated` 字段；额外以 `(severity, kind, remediation)` 提供确定性 `issue_groups`，每组包含总数、最多三个样本和省略数量。`limits.group_limit` 与 `limits.groups_truncated` 明确分组摘要的边界。error/warning 优先占用 `issues` 配额；二者合计超限时，配额在两个非空严重级别间轮转，避免任一级别被另一方完全挤出。完整审计记录仍只存在 `scan_issues`。摘要必须由数据库聚合、窗口样本和有界原始问题查询生成，不能先把所有问题载入 host 进程后截断。
 
 | ID | 可判定输入 | 必须输出 | 失败或降级行为 | 需求映射 |
 | --- | --- | --- | --- | --- |
