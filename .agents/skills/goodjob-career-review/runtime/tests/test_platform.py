@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from goodjob.git_metadata import classify_git_command_failure
+from goodjob.git_metadata import GIT_ENV, classify_git_command_failure
 from goodjob.platform import detect_platform, select_git_sandbox
 from goodjob.platform.detect import (
     GitSandboxUnavailableError,
@@ -145,7 +145,7 @@ def test_sandbox_failure_reason_only_classifies_launcher_failures(
         (
             128,
             "fatal: unable to read /outside/gitconfig: Operation not permitted",
-            "git_executable_unusable",
+            "git_repository_boundary_violation",
         ),
         (
             128,
@@ -153,6 +153,11 @@ def test_sandbox_failure_reason_only_classifies_launcher_failures(
             "git_repository_boundary_violation",
         ),
         (128, "fatal: not a git repository", "broken_repository"),
+        (
+            127,
+            "fatal: unable to read /outside/gitconfig: Permission denied",
+            "git_repository_boundary_violation",
+        ),
         (127, "", "git_executable_unusable"),
     ],
 )
@@ -168,6 +173,14 @@ def test_git_failure_diagnosis_separates_toolchain_boundary_and_repository(
     assert diagnosis.kind == expected_kind
     assert diagnosis.message
     assert diagnosis.remediation
+
+
+def test_git_subprocess_diagnostics_use_the_c_locale() -> None:
+    assert {name: GIT_ENV[name] for name in ("LC_ALL", "LANG", "LANGUAGE")} == {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "LANGUAGE": "C",
+    }
 
 
 def test_git_state_reports_sandbox_unavailable_with_enablement_guidance(

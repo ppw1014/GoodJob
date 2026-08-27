@@ -77,13 +77,23 @@ def classify_git_command_failure(
 ) -> GitFailureDiagnosis:
     """Classify known Git entry-point and boundary failures without exposing stderr.
 
-    Git's diagnostic text is untrusted and may be localized.  Only stable markers
-    that identify the launcher/toolchain itself are used for the executable class;
-    permission failures remain repository-boundary failures.  Everything else is
-    an ordinary repository failure.
+    Git subprocesses use the C locale, so the recognized permission markers are
+    stable. Permission failures take precedence over toolchain markers because
+    they describe the boundary that blocked the command. Everything else is an
+    ordinary repository failure.
     """
     del stdout
     normalized = stderr.casefold()
+    permission_markers = (
+        "operation not permitted",
+        "permission denied",
+    )
+    if any(marker in normalized for marker in permission_markers):
+        return GitFailureDiagnosis(
+            "git_repository_boundary_violation",
+            "Repository metadata requested a path outside the authorized Git sandbox.",
+            "Remove root-external Git config or object indirection, then run refresh.",
+        )
     executable_markers = (
         "xcrun: error:",
         "xcode-select:",
@@ -98,12 +108,6 @@ def classify_git_command_failure(
             "The selected Git executable or its required system configuration is unusable.",
             "Select an installed trusted Git executable with readable system configuration, "
             "then run refresh.",
-        )
-    if any(marker in stderr for marker in ("Operation not permitted", "Permission denied")):
-        return GitFailureDiagnosis(
-            "git_repository_boundary_violation",
-            "Repository metadata requested a path outside the authorized Git sandbox.",
-            "Remove root-external Git config or object indirection, then run refresh.",
         )
     return GitFailureDiagnosis(
         "broken_repository",
@@ -127,6 +131,8 @@ GIT_ENV = {
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_TERMINAL_PROMPT": "0",
     "LC_ALL": "C",
+    "LANG": "C",
+    "LANGUAGE": "C",
 }
 
 
